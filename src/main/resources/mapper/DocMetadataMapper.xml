@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="org.example.mapper.DocMetadataMapper">
+
+    <resultMap id="BaseResultMap" type="org.example.entity.DocMetadata">
+            <id property="id" column="id" jdbcType="BIGINT"/>
+            <result property="fileName" column="file_name" jdbcType="VARCHAR"/>
+            <result property="filePath" column="file_path" jdbcType="VARCHAR"/>
+            <result property="md5Hash" column="md5_hash" jdbcType="VARCHAR"/>
+            <result property="status" column="status" jdbcType="TINYINT"/>
+            <result property="fileSize" column="file_size" jdbcType="BIGINT"/>
+            <result property="errorMsg" column="error_msg" jdbcType="VARCHAR"/>
+            <result property="lastModifiedTime" column="last_modified_time" jdbcType="TIMESTAMP"/>
+            <result property="createTime" column="create_time" jdbcType="TIMESTAMP"/>
+            <result property="updateTime" column="update_time" jdbcType="TIMESTAMP"/>
+            <result property="activeVersion" column="active_version" jdbcType="BIGINT"/>
+    </resultMap>
+
+    <sql id="Base_Column_List">
+        id,file_name,file_path,
+        md5_hash,status,file_size,
+        error_msg,last_modified_time,create_time,
+        update_time,active_version
+    </sql>
+</mapper>
