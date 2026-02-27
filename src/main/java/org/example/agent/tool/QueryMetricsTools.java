@@ -47,6 +47,7 @@ public class QueryMetricsTools {
         this.httpClient = new OkHttpClient.Builder()
                 .connectTimeout(Duration.ofSeconds(timeout))
                 .readTimeout(Duration.ofSeconds(timeout))
+                .retryOnConnectionFailure(false)  // Prometheus 不可用时不重试，避免持续报错
                 .build();
         logger.info("✅ QueryMetricsTools 初始化成功, Prometheus URL: {}, Mock模式: {}", prometheusBaseUrl, mockEnabled);
     }
@@ -176,19 +177,25 @@ public class QueryMetricsTools {
     private PrometheusAlertsResult fetchPrometheusAlerts() throws Exception {
         String apiUrl = prometheusBaseUrl + "/api/v1/alerts";
         logger.debug("请求 Prometheus API: {}", apiUrl);
-        
+
         Request request = new Request.Builder()
                 .url(apiUrl)
                 .get()
                 .build();
-        
+
         try (Response response = httpClient.newCall(request).execute()) {
             if (!response.isSuccessful()) {
                 throw new RuntimeException("HTTP 请求失败: " + response.code());
             }
-            
+
             String responseBody = response.body().string();
             return objectMapper.readValue(responseBody, PrometheusAlertsResult.class);
+        } catch (java.net.ConnectException e) {
+            logger.warn("无法连接到 Prometheus ({})，建议设置 prometheus.mock-enabled=true 或启动 Prometheus 服务", prometheusBaseUrl);
+            throw new RuntimeException("Prometheus 服务不可用: " + e.getMessage(), e);
+        } catch (java.net.SocketTimeoutException e) {
+            logger.warn("连接 Prometheus 超时");
+            throw new RuntimeException("连接 Prometheus 超时: " + e.getMessage(), e);
         }
     }
     

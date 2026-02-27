@@ -1,5 +1,6 @@
 package org.example.mapper;
 
+import org.apache.ibatis.annotations.Mapper;
 import org.example.entity.DocMetadata;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 
@@ -9,6 +10,7 @@ import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 * @createDate 2026-02-26 21:37:38
 * @Entity org.example.entity.DocMetadata
 */
+@Mapper
 public interface DocMetadataMapper extends BaseMapper<DocMetadata> {
 
 }

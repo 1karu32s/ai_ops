@@ -37,39 +37,34 @@ public class DocMetadata implements Serializable {
     private String md5Hash;
 
     /**
-     * 
+     * 状态: 0-publishing, 1-published, 2-deprecated
      */
     private Integer status;
 
     /**
-     * 
+     * 是否为当前活跃版本
+     */
+    private Boolean isCurrent;
+
+    /**
+     * 文件大小（字节）
      */
     private Long fileSize;
 
     /**
-     * 
+     * 分片数量
      */
-    private String errorMsg;
+    private Integer chunkCount;
 
     /**
-     * 
-     */
-    private Date lastModifiedTime;
-
-    /**
-     * 
+     * 版本创建时间
      */
     private Date createTime;
 
     /**
-     * 
+     * 版本状态更新时间
      */
     private Date updateTime;
-
-    /**
-     * 
-     */
-    private Long activeVersion;
 
     @TableField(exist = false)
     private static final long serialVersionUID = 1L;
@@ -91,12 +86,11 @@ public class DocMetadata implements Serializable {
             && (this.getFilePath() == null ? other.getFilePath() == null : this.getFilePath().equals(other.getFilePath()))
             && (this.getMd5Hash() == null ? other.getMd5Hash() == null : this.getMd5Hash().equals(other.getMd5Hash()))
             && (this.getStatus() == null ? other.getStatus() == null : this.getStatus().equals(other.getStatus()))
+            && (this.getIsCurrent() == null ? other.getIsCurrent() == null : this.getIsCurrent().equals(other.getIsCurrent()))
             && (this.getFileSize() == null ? other.getFileSize() == null : this.getFileSize().equals(other.getFileSize()))
-            && (this.getErrorMsg() == null ? other.getErrorMsg() == null : this.getErrorMsg().equals(other.getErrorMsg()))
-            && (this.getLastModifiedTime() == null ? other.getLastModifiedTime() == null : this.getLastModifiedTime().equals(other.getLastModifiedTime()))
+            && (this.getChunkCount() == null ? other.getChunkCount() == null : this.getChunkCount().equals(other.getChunkCount()))
             && (this.getCreateTime() == null ? other.getCreateTime() == null : this.getCreateTime().equals(other.getCreateTime()))
-            && (this.getUpdateTime() == null ? other.getUpdateTime() == null : this.getUpdateTime().equals(other.getUpdateTime()))
-            && (this.getActiveVersion() == null ? other.getActiveVersion() == null : this.getActiveVersion().equals(other.getActiveVersion()));
+            && (this.getUpdateTime() == null ? other.getUpdateTime() == null : this.getUpdateTime().equals(other.getUpdateTime()));
     }
 
     @Override
@@ -108,12 +102,11 @@ public class DocMetadata implements Serializable {
         result = prime * result + ((getFilePath() == null) ? 0 : getFilePath().hashCode());
         result = prime * result + ((getMd5Hash() == null) ? 0 : getMd5Hash().hashCode());
         result = prime * result + ((getStatus() == null) ? 0 : getStatus().hashCode());
+        result = prime * result + ((getIsCurrent() == null) ? 0 : getIsCurrent().hashCode());
         result = prime * result + ((getFileSize() == null) ? 0 : getFileSize().hashCode());
-        result = prime * result + ((getErrorMsg() == null) ? 0 : getErrorMsg().hashCode());
-        result = prime * result + ((getLastModifiedTime() == null) ? 0 : getLastModifiedTime().hashCode());
+        result = prime * result + ((getChunkCount() == null) ? 0 : getChunkCount().hashCode());
         result = prime * result + ((getCreateTime() == null) ? 0 : getCreateTime().hashCode());
         result = prime * result + ((getUpdateTime() == null) ? 0 : getUpdateTime().hashCode());
-        result = prime * result + ((getActiveVersion() == null) ? 0 : getActiveVersion().hashCode());
         return result;
     }
 
@@ -128,12 +121,11 @@ public class DocMetadata implements Serializable {
         sb.append(", filePath=").append(filePath);
         sb.append(", md5Hash=").append(md5Hash);
         sb.append(", status=").append(status);
+        sb.append(", isCurrent=").append(isCurrent);
         sb.append(", fileSize=").append(fileSize);
-        sb.append(", errorMsg=").append(errorMsg);
-        sb.append(", lastModifiedTime=").append(lastModifiedTime);
+        sb.append(", chunkCount=").append(chunkCount);
         sb.append(", createTime=").append(createTime);
         sb.append(", updateTime=").append(updateTime);
-        sb.append(", activeVersion=").append(activeVersion);
         sb.append(", serialVersionUID=").append(serialVersionUID);
         sb.append("]");
         return sb.toString();

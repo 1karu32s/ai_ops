@@ -1,8 +1,12 @@
 package org.example.controller;
 
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import org.example.config.FileUploadConfig;
 import org.example.dto.FileUploadRes;
+import org.example.entity.DocMetadata;
+import org.example.service.DocMetadataService;
 import org.example.service.VectorIndexService;
+import org.example.util.FileUpdateLockManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -17,8 +21,12 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.security.DigestInputStream;
+import java.security.MessageDigest;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 @RestController
 public class FileUploadController {
@@ -30,6 +38,15 @@ public class FileUploadController {
 
     @Autowired
     private VectorIndexService vectorIndexService;
+
+    @Autowired
+    private DocMetadataService docMetadataService;
+
+    @Autowired
+    private FileUpdateLockManager lockManager;
+
+    // 异步处理线程池
+    private final ExecutorService executor = Executors.newCachedThreadPool();
 
     @PostMapping(value = "/api/upload", consumes = "multipart/form-data")
     public ResponseEntity<?> upload(@RequestParam("file") MultipartFile file) {
@@ -48,6 +65,9 @@ public class FileUploadController {
                     .body("不支持的文件格式，仅支持: " + fileUploadConfig.getAllowedExtensions());
         }
 
+        // 获取文件锁（防止并发冲突）
+        FileUpdateLockManager.FileLock lock = lockManager.acquireLock(originalFilename);
+
         try {
             String uploadPath = fileUploadConfig.getPath();
             Path uploadDir = Paths.get(uploadPath).normalize();
@@ -55,51 +75,108 @@ public class FileUploadController {
                 Files.createDirectories(uploadDir);
             }
 
-            // 使用原始文件名，而不是UUID，以便实现基于文件名的去重
+            // 使用原始文件名
             Path filePath = uploadDir.resolve(originalFilename).normalize();
-            
-            // 如果文件已存在，先删除旧文件（实现覆盖更新）
+
+            // 如果文件已存在，先删除旧文件（覆盖磁盘文件）
             if (Files.exists(filePath)) {
                 logger.info("文件已存在，将覆盖: {}", filePath);
                 Files.delete(filePath);
             }
-            
-            Files.copy(file.getInputStream(), filePath);
 
+            // 保存文件到磁盘
+            Files.copy(file.getInputStream(), filePath);
             logger.info("文件上传成功: {}", filePath);
 
-            // 文件上传成功后，自动调用向量索引服务
-            try {
-                logger.info("开始为上传文件创建向量索引: {}", filePath);
-                vectorIndexService.indexSingleFile(filePath.toString());
-                logger.info("向量索引创建成功: {}", filePath);
-            } catch (Exception e) {
-                logger.error("向量索引创建失败: {}, 错误: {}", filePath, e.getMessage(), e);
-                // 注意：即使索引失败，文件上传仍然成功，只是记录错误日志
-                // 可以根据业务需求决定是否要删除文件或返回错误
+            // 计算 MD5
+            String md5Hash = calculateMd5(filePath);
+            logger.info("文件 MD5: {}", md5Hash);
+
+            // 检查是否已存在相同内容的活跃版本
+            DocMetadata existing = docMetadataService.getByFileNameAndMd5(originalFilename, md5Hash);
+            if (existing != null && existing.getIsCurrent()) {
+                logger.info("文件内容未变化，跳过处理: {}", originalFilename);
+                return ResponseEntity.ok(createResponse("文件未变化，跳过处理", originalFilename, filePath, file.getSize()));
             }
 
-            FileUploadRes response = new FileUploadRes(
-                    originalFilename,
-                    filePath.toString(),
-                    file.getSize()
-            );
+            // 创建新版本记录（status=0 publishing, is_current=false）
+            DocMetadata newVersion = new DocMetadata();
+            newVersion.setFileName(originalFilename);
+            newVersion.setFilePath(filePath.toString());
+            newVersion.setMd5Hash(md5Hash);
+            newVersion.setStatus(DocMetadataService.STATUS_PUBLISHING);
+            newVersion.setIsCurrent(false);
+            newVersion.setFileSize(file.getSize());
+            docMetadataService.save(newVersion);
 
-            // 使用统一的API响应格式
-            ApiResponse<FileUploadRes> apiResponse = new ApiResponse<>();
-            apiResponse.setCode(200);
-            apiResponse.setMessage("success");
-            apiResponse.setData(response);
-            
-            return ResponseEntity.ok(apiResponse);
+            logger.info("创建新版本记录: id={}, file={}", newVersion.getId(), originalFilename);
+
+            // 异步处理向量化
+            Long versionId = newVersion.getId();
+            executor.submit(() -> {
+                try {
+                    vectorIndexService.indexSingleFileWithVersion(filePath.toString(), versionId);
+                } catch (Exception e) {
+                    logger.error("异步向量化失败: file={}, versionId={}, error={}",
+                        originalFilename, versionId, e.getMessage(), e);
+                    // 失败时标记版本为 deprecated
+                    newVersion.setStatus(DocMetadataService.STATUS_DEPRECATED);
+                    docMetadataService.updateById(newVersion);
+                }
+            });
+
+            // 立即返回响应
+            return ResponseEntity.ok(createResponse(
+                "文件已接收，正在后台处理向量化",
+                originalFilename, filePath, file.getSize()));
 
         } catch (IOException e) {
+            logger.error("文件上传失败: {}", e.getMessage(), e);
             ApiResponse<String> errorResponse = new ApiResponse<>();
             errorResponse.setCode(500);
             errorResponse.setMessage("文件上传失败: " + e.getMessage());
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(errorResponse);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
+        } finally {
+            lock.unlock();
         }
+    }
+
+    /**
+     * 计算 MD5 哈希
+     */
+    private String calculateMd5(Path filePath) throws IOException {
+        MessageDigest md;
+        try {
+            md = MessageDigest.getInstance("MD5");
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new RuntimeException("MD5 算法不可用", e);
+        }
+
+        try (DigestInputStream dis = new DigestInputStream(Files.newInputStream(filePath), md)) {
+            byte[] buffer = new byte[8192];
+            while (dis.read(buffer) != -1) {
+                // 读取文件以更新摘要
+            }
+        }
+
+        byte[] digest = md.digest();
+        StringBuilder sb = new StringBuilder();
+        for (byte b : digest) {
+            sb.append(String.format("%02x", b));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 创建统一响应
+     */
+    private ApiResponse<FileUploadRes> createResponse(String message, String fileName, Path filePath, long fileSize) {
+        FileUploadRes data = new FileUploadRes(fileName, filePath.toString(), fileSize);
+        ApiResponse<FileUploadRes> response = new ApiResponse<>();
+        response.setCode(200);
+        response.setMessage(message);
+        response.setData(data);
+        return response;
     }
 
     /**

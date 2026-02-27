@@ -11,11 +11,13 @@ import lombok.Getter;
 import lombok.Setter;
 import org.example.constant.MilvusConstants;
 import org.example.dto.DocumentChunk;
+import org.example.entity.DocMetadata;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.io.File;
 import java.nio.file.Files;
@@ -41,6 +43,9 @@ public class VectorIndexService {
 
     @Autowired
     private DocumentChunkService chunkService;
+
+    @Autowired
+    private DocMetadataService docMetadataService;
 
     @Value("${file.upload.path}")
     private String uploadPath;
@@ -168,6 +173,85 @@ public class VectorIndexService {
     }
 
     /**
+     * 索引单个文件（带版本控制，支持非阻塞更新）
+     *
+     * @param filePath 文件路径
+     * @param versionId 版本 ID
+     * @throws Exception 索引失败时抛出异常
+     */
+    public void indexSingleFileWithVersion(String filePath, Long versionId) throws Exception {
+        Path path = Paths.get(filePath).normalize();
+        File file = path.toFile();
+
+        if (!file.exists() || !file.isFile()) {
+            throw new IllegalArgumentException("文件不存在: " + filePath);
+        }
+
+        logger.info("开始索引文件: {}, versionId={}", path, versionId);
+
+        // 1. 读取文件内容
+        String content = Files.readString(path);
+        logger.info("读取文件: {}, 内容长度: {} 字符", path, content.length());
+
+        // 2. 文档分片
+        List<DocumentChunk> chunks = chunkService.chunkDocument(content, path.toString());
+        logger.info("文档分片完成: {} -> {} 个分片", filePath, chunks.size());
+
+        // 3. 为每个分片生成向量并插入 Milvus
+        for (int i = 0; i < chunks.size(); i++) {
+            DocumentChunk chunk = chunks.get(i);
+
+            try {
+                // 生成向量
+                List<Float> vector = embeddingService.generateEmbedding(chunk.getContent());
+
+                // 构建元数据（包含 versionId）
+                Map<String, Object> metadata = buildMetadataWithVersion(path.toString(), chunk, chunks.size(), versionId);
+
+                // 插入到 Milvus
+                insertToMilvus(chunk.getContent(), vector, metadata, chunk.getChunkIndex());
+
+                logger.info("✓ 分片 {}/{} 索引成功", i + 1, chunks.size());
+
+            } catch (Exception e) {
+                logger.error("✗ 分片 {}/{} 索引失败", i + 1, chunks.size(), e);
+                throw new RuntimeException("分片索引失败: " + e.getMessage(), e);
+            }
+        }
+
+        // 4. 所有分片完成后，更新 chunk_count 并切换版本状态
+        String fileName = path.getFileName().toString();
+
+        // 更新版本记录：设置 chunk_count 和状态
+        DocMetadata version = docMetadataService.getById(versionId);
+        if (version != null) {
+            version.setChunkCount(chunks.size());
+            docMetadataService.updateById(version);
+            logger.info("更新版本记录: versionId={}, chunkCount={}", versionId, chunks.size());
+        }
+
+        // 切换到活跃版本
+        switchVersion(fileName, versionId);
+
+        logger.info("文件索引完成: {}, versionId={}, 共 {} 个分片", filePath, versionId, chunks.size());
+    }
+
+    /**
+     * 切换文件版本（原子操作）
+     *
+     * @param fileName 文件名
+     * @param newVersionId 新版本 ID
+     */
+    private void switchVersion(String fileName, Long newVersionId) {
+        logger.info("切换文件版本: fileName={}, newVersionId={}", fileName, newVersionId);
+
+        // 调用 DocMetadataService 进行原子切换
+        docMetadataService.switchActiveVersion(fileName, newVersionId);
+
+        logger.info("版本切换成功: fileName={}, activeVersionId={}", fileName, newVersionId);
+    }
+
+    /**
      * 删除文件的旧数据（根据 metadata._source）
      */
     private void deleteExistingData(String filePath) {
@@ -215,9 +299,16 @@ public class VectorIndexService {
     }
 
     /**
-     * 构建元数据（包含文件信息）
+     * 构建元数据（包含文件信息）- 兼容旧版本
      */
     private Map<String, Object> buildMetadata(String filePath, DocumentChunk chunk, int totalChunks) {
+        return buildMetadataWithVersion(filePath, chunk, totalChunks, null);
+    }
+
+    /**
+     * 构建元数据（包含文件信息和版本ID）
+     */
+    private Map<String, Object> buildMetadataWithVersion(String filePath, DocumentChunk chunk, int totalChunks, Long versionId) {
         Map<String, Object> metadata = new HashMap<>();
         
         // 标准化路径：使用统一的路径分隔符（正斜杠）用于存储，确保跨平台一致性
@@ -240,7 +331,12 @@ public class VectorIndexService {
         // 分片信息
         metadata.put("chunkIndex", chunk.getChunkIndex());
         metadata.put("totalChunks", totalChunks);
-        
+
+        // 版本信息
+        if (versionId != null) {
+            metadata.put("versionId", versionId);
+        }
+
         // 标题信息
         if (chunk.getTitle() != null && !chunk.getTitle().isEmpty()) {
             metadata.put("title", chunk.getTitle());

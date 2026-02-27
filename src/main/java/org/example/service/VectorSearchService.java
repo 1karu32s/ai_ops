@@ -16,6 +16,7 @@ import org.springframework.stereotype.Service;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 向量搜索服务
@@ -32,9 +33,12 @@ public class VectorSearchService {
     @Autowired
     private VectorEmbeddingService embeddingService;
 
+    @Autowired
+    private DocMetadataService docMetadataService;
+
     /**
-     * 搜索相似文档
-     * 
+     * 搜索相似文档（只返回活跃版本）
+     *
      * @param query 查询文本
      * @param topK 返回最相似的K个结果
      * @return 搜索结果列表
@@ -43,54 +47,105 @@ public class VectorSearchService {
         try {
             logger.info("开始搜索相似文档, 查询: {}, topK: {}", query, topK);
 
-            // 1. 将查询文本向量化
+            // 1. 获取活跃版本 ID 列表
+            Set<Long> activeVersionIds = docMetadataService.getActiveVersionIds();
+            logger.debug("活跃版本数量: {}", activeVersionIds.size());
+
+            // 2. 将查询文本向量化
             List<Float> queryVector = embeddingService.generateQueryVector(query);
             logger.debug("查询向量生成成功, 维度: {}", queryVector.size());
 
-            // 2. 构建搜索参数
+            // 3. 构建搜索参数（多取一些，后续过滤）
             SearchParam searchParam = SearchParam.newBuilder()
                     .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
                     .withVectorFieldName("vector")
                     .withVectors(Collections.singletonList(queryVector))
-                    .withTopK(topK)
+                    .withTopK(topK * 2)  // 多取一些，后续过滤
                     .withMetricType(io.milvus.param.MetricType.L2)
                     .withOutFields(List.of("id", "content", "metadata"))
                     .withParams("{\"nprobe\":10}")
                     .build();
 
-            // 3. 执行搜索
+            // 4. 执行搜索
             R<SearchResults> searchResponse = milvusClient.search(searchParam);
 
             if (searchResponse.getStatus() != 0) {
                 throw new RuntimeException("向量搜索失败: " + searchResponse.getMessage());
             }
 
-            // 4. 解析搜索结果
+            // 5. 解析搜索结果并过滤活跃版本
             SearchResultsWrapper wrapper = new SearchResultsWrapper(searchResponse.getData().getResults());
-            List<SearchResult> results = new ArrayList<>();
+            List<SearchResult> allResults = new ArrayList<>();
 
             for (int i = 0; i < wrapper.getRowRecords(0).size(); i++) {
                 SearchResult result = new SearchResult();
                 result.setId((String) wrapper.getIDScore(0).get(i).get("id"));
                 result.setContent((String) wrapper.getFieldData("content", 0).get(i));
                 result.setScore(wrapper.getIDScore(0).get(i).getScore());
-                
+
                 // 解析 metadata
                 Object metadataObj = wrapper.getFieldData("metadata", 0).get(i);
                 if (metadataObj != null) {
                     result.setMetadata(metadataObj.toString());
                 }
-                
-                results.add(result);
+
+                allResults.add(result);
             }
 
-            logger.info("搜索完成, 找到 {} 个相似文档", results.size());
-            return results;
+            // 6. 过滤：只保留活跃版本的结果
+            List<SearchResult> filteredResults = new ArrayList<>();
+            for (SearchResult result : allResults) {
+                // 从 metadata 中提取 versionId
+                Long versionId = extractVersionId(result.getMetadata());
+                if (versionId == null || activeVersionIds.contains(versionId)) {
+                    filteredResults.add(result);
+                    if (filteredResults.size() >= topK) {
+                        break;
+                    }
+                }
+            }
+
+            logger.info("搜索完成, 原始结果: {}, 过滤后: {}", allResults.size(), filteredResults.size());
+            return filteredResults;
 
         } catch (Exception e) {
             logger.error("搜索相似文档失败", e);
             throw new RuntimeException("搜索失败: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * 从 metadata JSON 字符串中提取 versionId
+     */
+    private Long extractVersionId(String metadataJson) {
+        if (metadataJson == null || metadataJson.isEmpty()) {
+            return null;
+        }
+        try {
+            // 简单解析 JSON 字符串，查找 versionId
+            int versionIdIndex = metadataJson.indexOf("\"versionId\"");
+            if (versionIdIndex == -1) {
+                return null;
+            }
+            int colonIndex = metadataJson.indexOf(":", versionIdIndex);
+            if (colonIndex == -1) {
+                return null;
+            }
+            int startIndex = colonIndex + 1;
+            while (startIndex < metadataJson.length() && Character.isWhitespace(metadataJson.charAt(startIndex))) {
+                startIndex++;
+            }
+            int endIndex = startIndex;
+            while (endIndex < metadataJson.length() && Character.isDigit(metadataJson.charAt(endIndex))) {
+                endIndex++;
+            }
+            if (endIndex > startIndex) {
+                return Long.parseLong(metadataJson.substring(startIndex, endIndex));
+            }
+        } catch (Exception e) {
+            logger.debug("解析 versionId 失败: {}", metadataJson);
+        }
+        return null;
     }
 
     /**
@@ -103,6 +158,6 @@ public class VectorSearchService {
         private String content;
         private float score;
         private String metadata;
-
+        private Long versionId;  // 版本 ID
     }
 }

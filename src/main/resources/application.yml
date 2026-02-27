@@ -49,6 +49,22 @@ spring:
             tencent-cls:
               url: https://mcp-api.tencent-cloud.com
               sse-endpoint: /sse/e34f947b497929be # 完整的SSE端点路径
+
+  # Redis 配置
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password: ""  # 如有密码请填写
+      database: 0
+      timeout: 5000ms
+      lettuce:
+        pool:
+          max-active: 8
+          max-idle: 8
+          min-idle: 0
+          max-wait: -1ms
+
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://localhost:3306/ai_ops?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai
@@ -86,8 +102,14 @@ rag:
 prometheus:
   base-url: http://localhost:9090
   timeout: 10  # 超时时间（秒）
-  mock-enabled: false  # 是否启用 Mock 模式（用于测试）
+  mock-enabled: true  # 是否启用 Mock 模式（用于测试，未配置Prometheus时建议设为true）
 
 # CLS 云日志服务配置
 cls:
   mock-enabled: false  # 是否启用 Mock 模式（用于测试，设为 true 返回与告警关联的模拟日志数据）
+
+# 对话存储配置
+conversation:
+  cache:
+    expire-days: 7  # Redis 缓存过期时间（天）
+    recent-sessions-limit: 100  # 最近会话列表最大数量

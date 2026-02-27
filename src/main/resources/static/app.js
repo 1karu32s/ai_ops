@@ -6,15 +6,18 @@ class SuperBizAgentApp {
         this.sessionId = this.generateSessionId();
         this.isStreaming = false;
         this.currentChatHistory = []; // 当前对话的消息历史
-        this.chatHistories = this.loadChatHistories(); // 所有历史对话
+        this.chatHistories = this.loadChatHistoriesSync(); // 先从 localStorage 加载
         this.isCurrentChatFromHistory = false; // 标记当前对话是否是从历史记录加载的
-        
+
         this.initializeElements();
         this.bindEvents();
         this.updateUI();
         this.initMarkdown();
         this.checkAndSetCentered();
         this.renderChatHistory();
+
+        // 异步从后端加载会话列表
+        this.loadChatHistoriesAsync();
     }
 
     // 初始化Markdown配置
@@ -353,13 +356,85 @@ class SuperBizAgentApp {
         this.saveChatHistories();
     }
     
-    // 加载历史对话列表
-    loadChatHistories() {
+    // 同步加载本地历史对话（用于初始化）
+    loadChatHistoriesSync() {
         try {
             const stored = localStorage.getItem('chatHistories');
             return stored ? JSON.parse(stored) : [];
         } catch (e) {
-            console.error('加载历史对话失败:', e);
+            console.error('加载本地历史对话失败:', e);
+            return [];
+        }
+    }
+
+    // 异步加载后端会话列表
+    async loadChatHistoriesAsync() {
+        try {
+            console.log('从后端获取会话列表...');
+            const backendHistories = await this.fetchChatHistoriesFromBackend();
+
+            if (backendHistories.length > 0) {
+                // 合并本地和后端数据（去重）
+                const localIds = new Set(this.chatHistories.map(h => h.id));
+                const newHistories = backendHistories.filter(h => !localIds.has(h.id));
+
+                this.chatHistories = [...newHistories, ...this.chatHistories];
+
+                // 保存到 localStorage
+                this.saveChatHistories();
+
+                // 重新渲染
+                this.renderChatHistory();
+                console.log(`从后端加载了 ${newHistories.length} 个新会话`);
+            }
+        } catch (e) {
+            console.error('异步加载会话列表失败:', e);
+        }
+    }
+
+    // 从后端获取会话列表
+    async fetchChatHistoriesFromBackend() {
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/chat/sessions/recent?limit=20`);
+            const result = await response.json();
+
+            if (result.code === 200 && result.data) {
+                // 转换后端数据格式为前端格式
+                return result.data.map(session => ({
+                    id: session.sessionId,
+                    title: session.title || '新对话',
+                    messages: [], // 消息会在点击加载时获取
+                    createTime: session.createTime,
+                    updateTime: session.updateTime
+                }));
+            }
+
+            return [];
+        } catch (e) {
+            console.error('从后端获取会话列表失败:', e);
+            return [];
+        }
+    }
+    // 从后端获取会话列表
+    async fetchChatHistoriesFromBackend() {
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/chat/sessions/recent?limit=20`);
+            const result = await response.json();
+
+            if (result.code === 200 && result.data) {
+                // 转换后端数据格式为前端格式
+                return result.data.map(session => ({
+                    id: session.sessionId,
+                    title: session.title || '新对话',
+                    messages: [], // 消息会在点击加载时获取
+                    createTime: session.createTime,
+                    updateTime: session.updateTime
+                }));
+            }
+
+            return [];
+        } catch (e) {
+            console.error('从后端获取会话列表失败:', e);
             return [];
         }
     }
