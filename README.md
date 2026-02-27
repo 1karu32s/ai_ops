@@ -327,9 +327,11 @@ curl http://localhost:9900/milvus/health
 - 新增 `chat_message` 表：存储对话消息
 - `doc_metadata` 表新增字段：`chunk_count`、`is_current`
 
+
 ### v1.0.0
 - 初始版本发布
 
 **版本**: v1.1.0
-**作者**: chief
+**作者**: 1karu32s
+**原作者**: chief
 **许可证**: MIT
