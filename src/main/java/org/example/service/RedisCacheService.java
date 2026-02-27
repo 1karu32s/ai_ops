@@ -48,7 +48,7 @@ public class RedisCacheService {
         // 初始化 Lua 脚本
         addMessageScript = new DefaultRedisScript<>();
         addMessageScript.setScriptSource(new ResourceScriptSource(new ClassPathResource("lua/add_message.lua")));
-        addMessageScript.setResultType(String.class); // 关键修改
+        addMessageScript.setResultType(String.class); // 关键修改：返回类型改为 String
         log.info("Redis Lua 脚本加载完成");
     }
 
@@ -86,20 +86,19 @@ public class RedisCacheService {
 
         SessionMetadata metadata = new SessionMetadata();
         metadata.setSessionId(sessionId);
-        metadata.setTitle((String) data.get("title"));
-        metadata.setMessageCount(Integer.parseInt((String) data.getOrDefault("messageCount", "0")));
-        metadata.setCreateTime(Long.parseLong((String) data.getOrDefault("createTime", "0")));
-        metadata.setUpdateTime(Long.parseLong((String) data.getOrDefault("updateTime", "0")));
+
+        // 【修复 1】安全转换 title
+        Object titleObj = data.get("title");
+        metadata.setTitle(titleObj != null ? String.valueOf(titleObj) : "New Chat");
+
+        // 【修复 2】关键修复：使用 String.valueOf 防止 Integer 强转 String 报错
+        metadata.setMessageCount(Integer.parseInt(String.valueOf(data.getOrDefault("messageCount", "0"))));
+        metadata.setCreateTime(Long.parseLong(String.valueOf(data.getOrDefault("createTime", "0"))));
+        metadata.setUpdateTime(Long.parseLong(String.valueOf(data.getOrDefault("updateTime", "0"))));
 
         return metadata;
     }
 
-    /**
-     * 添加消息 (使用 Lua 脚本原子操作)
-     */
-    /**
-     * 添加消息 (使用 Lua 脚本原子操作)
-     */
     /**
      * 添加消息 (使用 Lua 脚本原子操作)
      */
@@ -114,11 +113,11 @@ public class RedisCacheService {
             String messageJson = objectMapper.writeValueAsString(message);
 
             // 执行 Lua 脚本
-            // 泛型 T 现在是 String，所以 resultSerializer 也可以用 String
+            // 【修复 3】显式指定序列化器，防止参数带引号导致 Lua 解析失败
             String result = redisTemplate.execute(
                     addMessageScript,
-                    RedisSerializer.string(), // argsSerializer: 参数按字符串发送，不加 JSON 引号
-                    RedisSerializer.string(), // resultSerializer: 结果按字符串接收
+                    RedisSerializer.string(), // argsSerializer
+                    RedisSerializer.string(), // resultSerializer
                     Collections.singletonList(sessionId), // keys
                     role, // ARGV[1]
                     messageJson, // ARGV[2]
@@ -137,7 +136,6 @@ public class RedisCacheService {
             return 0;
         }
     }
-
 
     /**
      * 获取会话消息列表 (使用 Pipeline 批量获取)
