@@ -35,6 +35,9 @@ public class ConversationService {
     @Autowired
     private ChatMessageMapper chatMessageMapper;
 
+    @Autowired
+    private ConversationSummaryService conversationSummaryService;
+
     // 异步持久化线程池
     private final ExecutorService persistExecutor = Executors.newFixedThreadPool(
             Runtime.getRuntime().availableProcessors() * 2,
@@ -103,6 +106,9 @@ public class ConversationService {
                 persistMessagePair(sessionId, userMessage, aiReply);
                 long dbTime = System.currentTimeMillis();
                 log.debug("MySQL 异步写入完成，总耗时: {}ms", dbTime - startTime);
+
+                // 3. 检查是否需要触发压缩
+                conversationSummaryService.triggerSummaryCompression(sessionId);
             } catch (Exception e) {
                 log.error("异步持久化消息失败: sessionId={}", sessionId, e);
             }

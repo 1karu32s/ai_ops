@@ -9,14 +9,14 @@ import java.io.Serializable;
 import java.util.Date;
 
 /**
- * 对话消息实体
+ * 对话摘要实体
  * @author 1karu32s
- * @description 对话消息表
- * @createDate 2026-02-27
+ * @description 对话摘要表，与会话一对一
+ * @createDate 2026-02-28
  */
-@TableName("chat_message")
+@TableName("chat_summary")
 @Data
-public class ChatMessage implements Serializable {
+public class ChatSummary implements Serializable {
 
     private static final long serialVersionUID = 1L;
 
@@ -27,27 +27,32 @@ public class ChatMessage implements Serializable {
     private Long id;
 
     /**
-     * 会话ID
+     * 会话ID（唯一）
      */
     private String sessionId;
 
     /**
-     * 角色: user/assistant
-     */
-    private String role;
-
-    /**
-     * 消息内容
+     * 摘要内容
      */
     private String content;
 
     /**
-     * 是否已被语义压缩: 0-否, 1-是
+     * 摘要版本号，每次压缩递增
      */
-    private Integer compressed;
+    private Integer version;
+
+    /**
+     * 已压缩的消息条数
+     */
+    private Integer compressedCount;
 
     /**
      * 创建时间
      */
     private Date createTime;
+
+    /**
+     * 更新时间
+     */
+    private Date updateTime;
 }

@@ -18,6 +18,7 @@
 - ✅ **AIOps 运维**: 智能诊断 + 多 Agent 协作 + 自动报告
 - ✅ **工具集成**: 文档检索、告警查询、日志分析、时间工具
 - ✅ **会话持久化**: Redis + MySQL 混合存储，异步写入，高并发优化
+- ✅ **语义压缩**: 智能对话摘要，自动压缩长对话历史，节省 Token ⭐ NEW
 - ✅ **版本控制**: 文档上传支持版本管理，非阻塞更新
 - ✅ **Web 界面**: 提供测试界面和 RESTful API
 
@@ -45,18 +46,21 @@ SuperBizAgent/
 │   │   └── FileUploadController.java  # 文件上传控制器 ⭐
 │   ├── service/
 │   │   ├── ChatService.java           # 对话服务 ⭐
-│   │   ├── ConversationService.java  # 对话持久化服务 ⭐ NEW
-│   │   ├── RedisCacheService.java     # Redis 缓存服务 ⭐ NEW
+│   │   ├── ConversationService.java  # 对话持久化服务 ⭐
+│   │   ├── ConversationSummaryService.java  # 语义压缩服务 ⭐ NEW
+│   │   ├── RedisCacheService.java     # Redis 缓存服务 ⭐
 │   │   ├── AiOpsService.java          # AIOps 服务 ⭐
 │   │   ├── RagService.java            # RAG 服务
 │   │   └── Vector*.java               # 向量服务
 │   ├── entity/                         # 实体类
-│   │   ├── ChatSession.java           # 会话实体 ⭐ NEW
-│   │   ├── ChatMessage.java           # 消息实体 ⭐ NEW
+│   │   ├── ChatSession.java           # 会话实体 ⭐
+│   │   ├── ChatMessage.java           # 消息实体 ⭐
+│   │   ├── ChatSummary.java           # 摘要实体 ⭐ NEW
 │   │   └── DocMetadata.java           # 文档元数据 ⭐
 │   ├── mapper/                         # MyBatis Mapper
-│   │   ├── ChatSessionMapper.java     # 会话 Mapper ⭐ NEW
-│   │   ├── ChatMessageMapper.java     # 消息 Mapper ⭐ NEW
+│   │   ├── ChatSessionMapper.java     # 会话 Mapper ⭐
+│   │   ├── ChatMessageMapper.java     # 消息 Mapper ⭐
+│   │   ├── ChatSummaryMapper.java     # 摘要 Mapper ⭐ NEW
 │   │   └── DocMetadataMapper.java     # 文档 Mapper ⭐
 │   ├── agent/tool/                    # Agent 工具集
 │   │   ├── DateTimeTools.java         # 时间工具
@@ -64,10 +68,11 @@ SuperBizAgent/
 │   │   ├── QueryMetricsTools.java     # 告警查询
 │   │   └── QueryLogsTools.java        # 日志查询
 │   ├── config/                        # 配置类
-│   │   ├── RedisConfig.java           # Redis 配置 ⭐ NEW
+│   │   ├── RedisConfig.java           # Redis 配置 ⭐
+│   │   ├── AsyncConfig.java           # 异步任务配置 ⭐ NEW
 │   │   └── DocumentChunkConfig.java   # 文档分片配置
 │   └── util/
-│       └── FileUpdateLockManager.java # 文件更新锁管理 ⭐ NEW
+│       └── FileUpdateLockManager.java # 文件更新锁管理 ⭐
 ├── src/main/resources/
 │   ├── db/
 │   │   └── schema_chat.sql            # 对话存储表结构 ⭐ NEW
@@ -181,6 +186,11 @@ conversation:
   cache:
     expire-days: 7  # Redis 缓存过期时间（天）
     recent-sessions-limit: 100
+  summary:
+    enabled: true              # 是否启用语义压缩
+    compress-threshold: 10     # 压缩阈值（消息条数，10条=5轮对话）
+    compress-batch-size: 10    # 每次压缩的消息条数
+    lock-timeout-seconds: 30   # 分布式锁超时时间（秒）
 
 # RAG 配置
 rag:
@@ -292,7 +302,7 @@ curl http://localhost:9900/milvus/health
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 文件版本控制 ⭐ NEW
+### 文件版本控制 ⭐
 
 ```
 上传新文件 → MD5 校验
@@ -306,7 +316,68 @@ curl http://localhost:9900/milvus/health
   完成后切换版本 → is_current=true
 ```
 
+### 语义压缩架构 ⭐ NEW
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    语义压缩流程                                │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│   每5轮对话 → 异步触发压缩                                   │
+│       │                                                      │
+│       ▼                                                      │
+│   Redis 分布式锁（会话级别互斥）                              │
+│       │                                                      │
+│       ▼                                                      │
+│   压缩智能体（独立配置，低温度）                              │
+│       │                                                      │
+│       ├─ 旧摘要 + 新增5轮 → 增量更新摘要                      │
+│       │                                                      │
+│       └─ 保存到 chat_summary 表（session_id 唯一）            │
+│                                                              │
+│   数据结构:                                                  │
+│   ┌─────────────────────────────────────────────────────┐   │
+│   │ chat_summary (与会话一对一)                          │   │
+│   │ - session_id (UNIQUE)                               │   │
+│   │ - content (摘要内容)                                 │   │
+│   │ - version (版本号)                                   │   │
+│   │ - compressed_count (已压缩消息数)                     │   │
+│   └─────────────────────────────────────────────────────┘   │
+│                                                              │
+│   最终上下文 = 系统指令 + 历史摘要 + 最近15轮完整对话           │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
 ## 📈 更新日志
+
+### v1.2.0 (2026-02-28)
+
+**新增功能：**
+- ✨ **语义压缩**: 智能对话摘要，自动压缩长对话历史，节省 Token
+- ✨ **独立摘要表**: 新增 `chat_summary` 表，与会话一对一关联
+- ✨ **异步压缩**: 后台异步处理，不阻塞用户响应
+- ✨ **增量更新**: 摘要增量演进，保留关键信息
+
+**技术优化：**
+- 🔧 新增 `ConversationSummaryService`：专门的压缩服务
+- 🔧 新增 `AsyncConfig`：异步任务配置，独立线程池
+- 🔧 Redis 分布式锁：会话级别互斥，防止并发压缩
+- 🔧 摘要版本追溯：支持版本号和压缩进度统计
+
+**数据库变更：**
+- 新增 `chat_summary` 表：存储对话摘要（session_id 唯一）
+- `chat_message` 表新增 `compressed` 字段：标记是否已压缩
+
+**配置项新增：**
+```yaml
+conversation:
+  summary:
+    enabled: true
+    compress-threshold: 10
+    compress-batch-size: 10
+    lock-timeout-seconds: 30
+```
 
 ### v1.1.0 (2026-02-27)
 
@@ -331,7 +402,7 @@ curl http://localhost:9900/milvus/health
 ### v1.0.0
 - 初始版本发布
 
-**版本**: v1.1.0
+**版本**: v1.2.0
 **作者**: 1karu32s
 **原作者**: chief
 **许可证**: MIT

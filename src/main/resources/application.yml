@@ -113,3 +113,8 @@ conversation:
   cache:
     expire-days: 7  # Redis 缓存过期时间（天）
     recent-sessions-limit: 100  # 最近会话列表最大数量
+  summary:
+    enabled: true  # 是否启用语义压缩
+    compress-threshold: 10  # 压缩阈值（消息条数，10条=5轮对话）
+    compress-batch-size: 10  # 每次压缩的消息条数
+    lock-timeout-seconds: 30  # 分布式锁超时时间（秒）
