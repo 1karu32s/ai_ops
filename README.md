@@ -412,6 +412,22 @@ curl http://localhost:9900/milvus/health
 
 ## 📈 更新日志
 
+### v1.3.1 (2026-03-01)
+
+**新增功能：**
+- ✨ **异步重试机制**: MySQL 持久化失败自动重试，提升数据可靠性
+
+**技术优化：**
+- 🔧 新增 `persistWithRetry()`：消息持久化重试，指数退避策略
+- 🔧 新增 `clearWithRetry()`：清空历史重试
+- 🔧 新增 `isRetryableException()`：智能判断可重试异常类型
+- 🔧 区分可重试异常（连接、超时）与不可重试异常（约束冲突）
+
+**重试策略：**
+- 最大重试次数: 3 次
+- 退避策略: 指数退避 (1s → 2s → 4s)
+- 可重试异常: Connection, timeout, Network, Lock, SQLException
+
 ### v1.3.0 (2026-02-28)
 
 **新增功能：**
@@ -486,7 +502,7 @@ conversation:
 ### v1.0.0
 - 初始版本发布
 
-**版本**: v1.3.0
+**版本**: v1.3.1
 **作者**: 1karu32s
 **原作者**: chief
 **许可证**: MIT

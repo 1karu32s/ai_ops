@@ -89,18 +89,9 @@ public class ConversationService {
         long redisTime = System.currentTimeMillis();
         log.debug("Redis 写入耗时: {}ms", redisTime - startTime);
 
-        // 2. 异步持久化到 MySQL (不阻塞响应)
+        // 2. 异步持久化到 MySQL (不阻塞响应，带重试机制)
         persistExecutor.execute(() -> {
-            try {
-                persistMessagePair(sessionId, userMessage, aiReply);
-                long dbTime = System.currentTimeMillis();
-                log.debug("MySQL 异步写入完成，总耗时: {}ms", dbTime - startTime);
-
-                // 3. 检查是否需要触发压缩
-                conversationSummaryService.triggerSummaryCompression(sessionId);
-            } catch (Exception e) {
-                log.error("异步持久化消息失败: sessionId={}", sessionId, e);
-            }
+            persistWithRetry(sessionId, userMessage, aiReply, startTime);
         });
     }
 
@@ -183,28 +174,9 @@ public class ConversationService {
         // 重新创建空会话
         redisCacheService.createSession(sessionId, "新对话");
 
-        // 异步删除 MySQL 数据
+        // 异步删除 MySQL 数据（带重试机制）
         persistExecutor.execute(() -> {
-            try {
-                // 删除所有消息
-                chatMessageMapper.delete(
-                        new LambdaQueryWrapper<ChatMessage>()
-                                .eq(ChatMessage::getSessionId, sessionId)
-                );
-                // 重置会话
-                ChatSession session = chatSessionMapper.selectOne(
-                        new LambdaQueryWrapper<ChatSession>()
-                                .eq(ChatSession::getSessionId, sessionId)
-                );
-                if (session != null) {
-                    session.setMessageCount(0);
-                    session.setTitle("新对话");
-                    chatSessionMapper.updateById(session);
-                }
-                log.info("会话历史已清空: {}", sessionId);
-            } catch (Exception e) {
-                log.error("清空会话历史失败: sessionId={}", sessionId, e);
-            }
+            clearWithRetry(sessionId);
         });
     }
 
@@ -275,6 +247,82 @@ public class ConversationService {
     }
 
     /**
+     * 带重试机制的持久化
+     * 指数退避重试，最大重试3次
+     */
+    private void persistWithRetry(String sessionId, String userMessage, String aiReply, long startTime) {
+        int maxRetries = 3;
+        int retryCount = 0;
+        boolean success = false;
+
+        while (retryCount < maxRetries && !success) {
+            try {
+                persistMessagePair(sessionId, userMessage, aiReply);
+                success = true;
+                long dbTime = System.currentTimeMillis();
+                log.debug("MySQL 异步写入完成，总耗时: {}ms", dbTime - startTime);
+
+                // 持久化成功后，检查是否需要触发压缩
+                conversationSummaryService.triggerSummaryCompression(sessionId);
+
+            } catch (Exception e) {
+                retryCount++;
+                if (retryCount >= maxRetries) {
+                    // 达到最大重试次数
+                    log.error("异步持久化消息失败，已达最大重试次数({}): sessionId={}, error={}",
+                            maxRetries, sessionId, e.getMessage(), e);
+                    // 失败的消息可以记录到本地队列或死信队列，这里暂时只记录日志
+                    return;
+                }
+
+                // 判断是否可重试的异常类型
+                boolean isRetryable = isRetryableException(e);
+                if (!isRetryable) {
+                    log.error("异步持久化消息失败，不可重试异常: sessionId={}, error={}",
+                            sessionId, e.getMessage(), e);
+                    return;
+                }
+
+                // 计算退避时间
+                long backoffTime = 1000L * (1L << (retryCount - 1)); // 1s, 2s, 4s
+                log.warn("异步持久化消息失败，准备重试 ({}/{}): sessionId={}, 等待{}ms后重试, error={}",
+                        retryCount, maxRetries, sessionId, backoffTime, e.getMessage());
+
+                try {
+                    Thread.sleep(backoffTime);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    log.error("重试等待被中断: sessionId={}", sessionId);
+                    return;
+                }
+            }
+        }
+    }
+
+    /**
+     * 判断异常是否可重试
+     */
+    private boolean isRetryableException(Exception e) {
+        String message = e.getMessage();
+        if (message == null) return false;
+
+        // 可重试的异常类型
+        String retryablePatterns[] = {
+            "Connection", "timeout", "Temporary failure", "Network",
+            "连接", "超时", "网络", "临时", "锁", "Lock"
+        };
+
+        for (String pattern : retryablePatterns) {
+            if (message.contains(pattern)) {
+                return true;
+            }
+        }
+
+        // 根据异常类型判断
+        return e instanceof java.sql.SQLException;
+    }
+
+    /**
      * 持久化消息对到 MySQL
      */
     @Transactional
@@ -308,6 +356,67 @@ public class ConversationService {
         } catch (Exception e) {
             log.error("持久化消息对失败: sessionId={}", sessionId, e);
             throw e;
+        }
+    }
+
+    /**
+     * 带重试机制的清空会话历史
+     * 指数退避重试，最大重试3次
+     */
+    private void clearWithRetry(String sessionId) {
+        int maxRetries = 3;
+        int retryCount = 0;
+        boolean success = false;
+
+        while (retryCount < maxRetries && !success) {
+            try {
+                // 删除所有消息
+                chatMessageMapper.delete(
+                        new LambdaQueryWrapper<ChatMessage>()
+                                .eq(ChatMessage::getSessionId, sessionId)
+                );
+                // 重置会话
+                ChatSession session = chatSessionMapper.selectOne(
+                        new LambdaQueryWrapper<ChatSession>()
+                                .eq(ChatSession::getSessionId, sessionId)
+                );
+                if (session != null) {
+                    session.setMessageCount(0);
+                    session.setTitle("新对话");
+                    chatSessionMapper.updateById(session);
+                }
+                log.info("会话历史已清空: {}", sessionId);
+                success = true;
+
+            } catch (Exception e) {
+                retryCount++;
+                if (retryCount >= maxRetries) {
+                    log.error("清空会话历史失败，已达最大重试次数({}): sessionId={}, error={}",
+                            maxRetries, sessionId, e.getMessage(), e);
+                    return;
+                }
+
+                // 判断是否可重试
+                boolean isRetryable = isRetryableException(e);
+                if (!isRetryable) {
+                    log.error("清空会话历史失败，不可重试异常: sessionId={}, error={}",
+                            sessionId, e.getMessage(), e);
+                    return;
+                }
+
+                // 计算退避时间
+                long backoffTime = 1000L * (1L << (retryCount - 1)); // 1s, 2s, 4s
+                log.warn("清空会话历史失败，准备重试 ({}/{}): sessionId={}, 等待{}ms后重试, error={}",
+                        retryCount, maxRetries, sessionId, backoffTime, e.getMessage());
+
+                try {
+                    Thread.sleep(backoffTime);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    log.error("重试等待被中断: sessionId={}", sessionId);
+                    return;
+                }
+            }
         }
     }
 }
