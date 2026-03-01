@@ -19,6 +19,7 @@
 - ✅ **工具集成**: 文档检索、告警查询、日志分析、时间工具
 - ✅ **会话持久化**: Redis + MySQL 混合存储，异步写入，高并发优化
 - ✅ **语义压缩**: 智能对话摘要，自动压缩长对话历史，节省 Token ⭐ NEW
+- ✅ **线程池优化**: 专用线程池配置，支持监控告警，高流量可靠性保障 ⭐ NEW
 - ✅ **版本控制**: 文档上传支持版本管理，非阻塞更新
 - ✅ **Web 界面**: 提供测试界面和 RESTful API
 
@@ -43,11 +44,13 @@ SuperBizAgent/
 ├── src/main/java/org/example/
 │   ├── controller/
 │   │   ├── ChatController.java        # 统一接口控制器 ⭐
-│   │   └── FileUploadController.java  # 文件上传控制器 ⭐
+│   │   ├── FileUploadController.java  # 文件上传控制器 ⭐
+│   │   └── MonitorController.java     # 监控接口控制器 ⭐ NEW
 │   ├── service/
 │   │   ├── ChatService.java           # 对话服务 ⭐
 │   │   ├── ConversationService.java  # 对话持久化服务 ⭐
 │   │   ├── ConversationSummaryService.java  # 语义压缩服务 ⭐ NEW
+│   │   ├── ThreadPoolMonitorService.java    # 线程池监控服务 ⭐ NEW
 │   │   ├── RedisCacheService.java     # Redis 缓存服务 ⭐
 │   │   ├── AiOpsService.java          # AIOps 服务 ⭐
 │   │   ├── RagService.java            # RAG 服务
@@ -70,6 +73,7 @@ SuperBizAgent/
 │   ├── config/                        # 配置类
 │   │   ├── RedisConfig.java           # Redis 配置 ⭐
 │   │   ├── AsyncConfig.java           # 异步任务配置 ⭐ NEW
+│   │   ├── ThreadPoolConfig.java      # 统一线程池配置 ⭐ NEW
 │   │   └── DocumentChunkConfig.java   # 文档分片配置
 │   └── util/
 │       └── FileUpdateLockManager.java # 文件更新锁管理 ⭐
@@ -316,6 +320,63 @@ curl http://localhost:9900/milvus/health
   完成后切换版本 → is_current=true
 ```
 
+### 线程池优化架构 ⭐ NEW
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    统一线程池配置                              │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│   根据 IO 密集型任务特性优化线程池参数：                        │
+│   核心线程数 = CPU 核心数 × 2                                  │
+│   最大线程数 = CPU 核心数 × 4                                  │
+│                                                              │
+│   专用线程池：                                                │
+│   ┌─────────────────────────────────────────────────────┐    │
+│   │ sseExecutor (SSE 流式响应)                           │    │
+│   │ - core: 32, max: 64, queue: 64                       │    │
+│   │ - 拒绝策略: CallerRunsPolicy                         │    │
+│   │ - 用途: 处理长时间 SSE 连接                           │    │
+│   └─────────────────────────────────────────────────────┘    │
+│   ┌─────────────────────────────────────────────────────┐    │
+│   │ vectorExecutor (文档向量化)                         │    │
+│   │ - core: 8, max: 16, queue: 20                        │    │
+│   │ - 拒绝策略: AbortPolicy                              │    │
+│   │ - 用途: 控制并发 Milvus 索引                         │    │
+│   └─────────────────────────────────────────────────────┘    │
+│   ┌─────────────────────────────────────────────────────┐    │
+│   │ persistExecutor (MySQL 持久化)                      │    │
+│   │ - core: 32, max: 64, queue: 200                      │    │
+│   │ - 拒绝策略: CallerRunsPolicy                         │    │
+│   │ - 用途: 高频轻量任务，有界队列缓冲                   │    │
+│   └─────────────────────────────────────────────────────┘    │
+│   ┌─────────────────────────────────────────────────────┐    │
+│   │ summaryExecutor (语义压缩)                          │    │
+│   │ - core: 2, max: 5, queue: 50                         │    │
+│   │ - 拒绝策略: CallerRunsPolicy                         │    │
+│   │ - 用途: LLM 调用压缩，可降级处理                     │    │
+│   └─────────────────────────────────────────────────────┘    │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│                    线程池监控体系                              │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│   监控功能：                                                 │
+│   • 定时日志：每 30 秒输出线程池状态                         │
+│   • HTTP 接口：GET /api/monitor/thread-pools                 │
+│   • 自动告警：队列使用率 ≥ 70% 警告，≥ 90% 错误             │
+│                                                              │
+│   监控指标：                                                 │
+│   • 活跃线程数 / 线程池大小                                  │
+│   • 队列当前大小 / 队列容量                                  │
+│   • 队列使用率（百分比）                                     │
+│   • 已完成任务数 / 总任务数                                  │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
 ### 语义压缩架构 ⭐ NEW
 
 ```
@@ -350,6 +411,29 @@ curl http://localhost:9900/milvus/health
 ```
 
 ## 📈 更新日志
+
+### v1.3.0 (2026-02-28)
+
+**新增功能：**
+- ✨ **线程池优化**: 统一线程池配置，根据任务类型（IO密集）优化参数
+- ✨ **线程池监控**: 实时监控线程池状态，支持自动告警
+- ✨ **监控接口**: 新增 `/api/monitor/thread-pools` 查询线程池指标
+
+**技术优化：**
+- 🔧 新增 `ThreadPoolConfig`：统一线程池配置类
+- 🔧 新增 `ThreadPoolMonitorService`：线程池监控服务
+- 🔧 新增 `MonitorController`：监控接口控制器
+- 🔧 修复原有 `newCachedThreadPool` 无限线程风险
+- 🔧 优化拒绝策略：CallerRunsPolicy（数据可靠性）+ AbortPolicy（系统保护）
+
+**线程池配置：**
+```yaml
+thread:
+  pool:
+    sse: {core-size: 32, max-size: 64, queue-capacity: 64}
+    vector: {core-size: 8, max-size: 16, queue-capacity: 20}
+    persist: {core-size: 32, max-size: 64, queue-capacity: 200}
+```
 
 ### v1.2.0 (2026-02-28)
 
@@ -402,7 +486,7 @@ conversation:
 ### v1.0.0
 - 初始版本发布
 
-**版本**: v1.2.0
+**版本**: v1.3.0
 **作者**: 1karu32s
 **原作者**: chief
 **许可证**: MIT
