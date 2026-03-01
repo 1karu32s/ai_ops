@@ -25,8 +25,7 @@ import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.util.Arrays;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.Executor;
 
 @RestController
 public class FileUploadController {
@@ -45,8 +44,9 @@ public class FileUploadController {
     @Autowired
     private FileUpdateLockManager lockManager;
 
-    // 异步处理线程池
-    private final ExecutorService executor = Executors.newCachedThreadPool();
+    @Autowired
+    @org.springframework.beans.factory.annotation.Qualifier("vectorExecutor")
+    private Executor vectorExecutor;
 
     @PostMapping(value = "/api/upload", consumes = "multipart/form-data")
     public ResponseEntity<?> upload(@RequestParam("file") MultipartFile file) {
@@ -113,7 +113,7 @@ public class FileUploadController {
 
             // 异步处理向量化
             Long versionId = newVersion.getId();
-            executor.submit(() -> {
+            vectorExecutor.execute(() -> {
                 try {
                     vectorIndexService.indexSingleFileWithVersion(filePath.toString(), versionId);
                 } catch (Exception e) {

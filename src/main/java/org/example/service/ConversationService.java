@@ -7,16 +7,14 @@ import org.example.entity.ChatSession;
 import org.example.mapper.ChatMessageMapper;
 import org.example.mapper.ChatSessionMapper;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.Executor;
 
 /**
  * 对话服务
@@ -38,18 +36,9 @@ public class ConversationService {
     @Autowired
     private ConversationSummaryService conversationSummaryService;
 
-    // 异步持久化线程池
-    private final ExecutorService persistExecutor = Executors.newFixedThreadPool(
-            Runtime.getRuntime().availableProcessors() * 2,
-            new ThreadFactory() {
-                private final AtomicInteger counter = new AtomicInteger(0);
-
-                @Override
-                public Thread newThread(Runnable r) {
-                    return new Thread(r, "persist-async-" + counter.incrementAndGet());
-                }
-            }
-    );
+    @Autowired
+    @Qualifier("persistExecutor")
+    private Executor persistExecutor;
 
     /**
      * 获取或创建会话
@@ -101,7 +90,7 @@ public class ConversationService {
         log.debug("Redis 写入耗时: {}ms", redisTime - startTime);
 
         // 2. 异步持久化到 MySQL (不阻塞响应)
-        persistExecutor.submit(() -> {
+        persistExecutor.execute(() -> {
             try {
                 persistMessagePair(sessionId, userMessage, aiReply);
                 long dbTime = System.currentTimeMillis();
@@ -195,7 +184,7 @@ public class ConversationService {
         redisCacheService.createSession(sessionId, "新对话");
 
         // 异步删除 MySQL 数据
-        persistExecutor.submit(() -> {
+        persistExecutor.execute(() -> {
             try {
                 // 删除所有消息
                 chatMessageMapper.delete(

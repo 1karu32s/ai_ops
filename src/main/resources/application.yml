@@ -118,3 +118,22 @@ conversation:
     compress-threshold: 10  # 压缩阈值（消息条数，10条=5轮对话）
     compress-batch-size: 10  # 每次压缩的消息条数
     lock-timeout-seconds: 30  # 分布式锁超时时间（秒）
+
+# 线程池配置（根据任务类型优化）
+thread:
+  pool:
+    # SSE 流式响应线程池
+    sse:
+      core-size: 32      # 核心线程数
+      max-size: 64       # 最大线程数
+      queue-capacity: 64 # 队列容量
+    # 文档向量化线程池
+    vector:
+      core-size: 8       # 核心线程数
+      max-size: 16       # 最大线程数
+      queue-capacity: 20 # 队列容量
+    # 持久化线程池
+    persist:
+      core-size: 32      # 核心线程数
+      max-size: 64       # 最大线程数
+      queue-capacity: 200 # 队列容量

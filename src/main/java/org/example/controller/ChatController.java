@@ -27,8 +27,7 @@ import reactor.core.publisher.Flux;
 
 import java.io.IOException;
 import java.util.*;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.Executor;
 
 /**
  * 统一 API 控制器
@@ -52,7 +51,9 @@ public class ChatController {
     @Autowired
     private ToolCallbackProvider tools;
 
-    private final ExecutorService executor = Executors.newCachedThreadPool();
+    @Autowired
+    @org.springframework.beans.factory.annotation.Qualifier("sseExecutor")
+    private Executor sseExecutor;
 
     /**
      * 普通对话接口（支持工具调用）
@@ -148,7 +149,7 @@ public class ChatController {
             return emitter;
         }
 
-        executor.execute(() -> {
+        sseExecutor.execute(() -> {
             try {
                 logger.info("收到 ReactAgent 对话请求 - SessionId: {}, Question: {}", request.getId(), request.getQuestion());
 
@@ -277,7 +278,7 @@ public class ChatController {
     public SseEmitter aiOps() {
         SseEmitter emitter = new SseEmitter(600000L); // 10分钟超时（告警分析可能较慢）
 
-        executor.execute(() -> {
+        sseExecutor.execute(() -> {
             try {
                 logger.info("收到 AI 智能运维请求 - 启动多 Agent 协作流程");
 
