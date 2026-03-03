@@ -422,6 +422,72 @@ public class ChatController {
         }
     }
 
+    /**
+     * 删除会话（软删除）
+     */
+    @DeleteMapping("/chat/session/{sessionId}")
+    public ResponseEntity<ApiResponse<String>> deleteSession(@PathVariable String sessionId) {
+        try {
+            logger.info("删除会话 - SessionId: {}", sessionId);
+            conversationService.softDeleteSession(sessionId);
+            return ResponseEntity.ok(ApiResponse.success("会话已删除"));
+        } catch (Exception e) {
+            logger.error("删除会话失败", e);
+            return ResponseEntity.ok(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    /**
+     * 修改会话标题
+     */
+    @PutMapping("/chat/session/{sessionId}/title")
+    public ResponseEntity<ApiResponse<String>> updateSessionTitle(
+            @PathVariable String sessionId,
+            @RequestBody Map<String, String> request) {
+        try {
+            String newTitle = request.get("title");
+            if (newTitle == null || newTitle.trim().isEmpty()) {
+                return ResponseEntity.ok(ApiResponse.error("标题不能为空"));
+            }
+            logger.info("修改会话标题 - SessionId: {}, 新标题: {}", sessionId, newTitle);
+            conversationService.updateSessionTitle(sessionId, newTitle.trim());
+            return ResponseEntity.ok(ApiResponse.success("标题修改成功"));
+        } catch (Exception e) {
+            logger.error("修改会话标题失败", e);
+            return ResponseEntity.ok(ApiResponse.error(e.getMessage()));
+        }
+    }
+
+    /**
+     * 获取会话消息历史
+     */
+    @GetMapping("/chat/session/{sessionId}/messages")
+    public ResponseEntity<ApiResponse<List<Map<String, String>>>> getSessionMessages(
+            @PathVariable String sessionId,
+            @RequestParam(defaultValue = "100") int limit) {
+        try {
+            logger.info("获取会话消息 - SessionId: {}, limit: {}", sessionId, limit);
+
+            List<RedisCacheService.Message> messages = conversationService.getMessages(sessionId, limit);
+
+            // 转换为前端需要的格式
+            List<Map<String, String>> result = new ArrayList<>();
+            for (RedisCacheService.Message msg : messages) {
+                Map<String, String> messageMap = new HashMap<>();
+                messageMap.put("type", msg.getRole());
+                messageMap.put("content", msg.getContent());
+                messageMap.put("timestamp", String.valueOf(msg.getCreateTime()));
+                result.add(messageMap);
+            }
+
+            return ResponseEntity.ok(ApiResponse.success(result));
+
+        } catch (Exception e) {
+            logger.error("获取会话消息失败", e);
+            return ResponseEntity.ok(ApiResponse.error(e.getMessage()));
+        }
+    }
+
     // ==================== 辅助方法 ====================
 
     /**

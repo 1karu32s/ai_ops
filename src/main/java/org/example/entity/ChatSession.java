@@ -50,4 +50,9 @@ public class ChatSession implements Serializable {
      * 消息数量（成对计数：用户消息+AI回复）
      */
     private Integer messageCount;
+
+    /**
+     * 是否已删除（软删除）
+     */
+    private Boolean deleted;
 }

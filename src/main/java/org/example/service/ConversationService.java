@@ -86,6 +86,9 @@ public class ConversationService {
         redisCacheService.addMessage(sessionId, "user", userMessage);
         redisCacheService.addMessage(sessionId, "assistant", aiReply);
 
+        // 更新会话标题（如果还没有标题，使用第一条用户消息的前30个字符）
+        updateSessionTitleIfNeeded(sessionId, userMessage);
+
         long redisTime = System.currentTimeMillis();
         log.debug("Redis 写入耗时: {}ms", redisTime - startTime);
 
@@ -93,6 +96,28 @@ public class ConversationService {
         persistExecutor.execute(() -> {
             persistWithRetry(sessionId, userMessage, aiReply, startTime);
         });
+    }
+
+    /**
+     * 如果会话没有标题，则设置为用户消息的前30个字符
+     */
+    private void updateSessionTitleIfNeeded(String sessionId, String userMessage) {
+        try {
+            RedisCacheService.SessionMetadata metadata = redisCacheService.getSession(sessionId);
+            if (metadata != null) {
+                String currentTitle = metadata.getTitle();
+                // 如果标题是空的或者是默认的"新对话"，则更新
+                if (currentTitle == null || currentTitle.isEmpty() ||
+                    "新对话".equals(currentTitle) || "New Chat".equals(currentTitle)) {
+                    String newTitle = userMessage.length() > 30 ?
+                        userMessage.substring(0, 30) + "..." : userMessage;
+                    redisCacheService.updateSessionTitle(sessionId, newTitle);
+                    log.debug("更新会话标题: sessionId={}, title={}", sessionId, newTitle);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("更新会话标题失败: sessionId={}", sessionId, e);
+        }
     }
 
     /**
@@ -181,6 +206,62 @@ public class ConversationService {
     }
 
     /**
+     * 软删除会话
+     */
+    public void softDeleteSession(String sessionId) {
+        // 软删除 Redis 缓存
+        redisCacheService.softDeleteSession(sessionId);
+
+        // 异步持久化删除状态到 MySQL
+        persistExecutor.execute(() -> {
+            try {
+                ChatSession session = chatSessionMapper.selectOne(
+                        new LambdaQueryWrapper<ChatSession>()
+                                .eq(ChatSession::getSessionId, sessionId)
+                );
+                if (session != null) {
+                    session.setDeleted(true);
+                    chatSessionMapper.updateById(session);
+                    log.debug("会话已标记为删除: {}", sessionId);
+                }
+            } catch (Exception e) {
+                log.error("标记会话删除失败: {}", sessionId, e);
+            }
+        });
+    }
+
+    /**
+     * 修改会话标题（同步写穿：先MySQL后Redis）
+     */
+    public void updateSessionTitle(String sessionId, String newTitle) {
+        // 1. 先更新 MySQL（主数据源）
+        ChatSession session = chatSessionMapper.selectOne(
+                new LambdaQueryWrapper<ChatSession>()
+                        .eq(ChatSession::getSessionId, sessionId)
+        );
+        if (session == null) {
+            throw new RuntimeException("会话不存在: " + sessionId);
+        }
+
+        String oldTitle = session.getTitle();
+        session.setTitle(newTitle);
+        chatSessionMapper.updateById(session);
+        log.debug("MySQL会话标题已更新: sessionId={}, oldTitle={}, newTitle={}", sessionId, oldTitle, newTitle);
+
+        // 2. 再更新 Redis（缓存），如果失败则回滚MySQL
+        try {
+            redisCacheService.updateSessionTitle(sessionId, newTitle);
+            log.debug("Redis会话标题已更新: sessionId={}, newTitle={}", sessionId, newTitle);
+        } catch (Exception e) {
+            // 回滚 MySQL
+            session.setTitle(oldTitle);
+            chatSessionMapper.updateById(session);
+            log.error("Redis更新失败，已回滚MySQL: sessionId={}", sessionId, e);
+            throw new RuntimeException("缓存更新失败，已回滚: " + e.getMessage());
+        }
+    }
+
+    /**
      * 获取最近会话列表
      * 优先从 Redis 获取，如果为空则从 MySQL 获取并回填 Redis
      */
@@ -192,6 +273,9 @@ public class ConversationService {
         if (sessionIds.isEmpty()) {
             List<ChatSession> dbSessions = chatSessionMapper.selectList(
                     new LambdaQueryWrapper<ChatSession>()
+                            .eq(ChatSession::getDeleted, false) // 过滤已删除的会话
+                            .or()
+                            .isNull(ChatSession::getDeleted) // 兼容旧数据
                             .orderByDesc(ChatSession::getUpdateTime)
                             .last("LIMIT " + limit)
             );

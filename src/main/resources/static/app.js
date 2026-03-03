@@ -3,11 +3,12 @@ class SuperBizAgentApp {
     constructor() {
         this.apiBaseUrl = 'http://localhost:9900/api';
         this.currentMode = 'quick'; // 'quick' 或 'stream'
-        this.sessionId = this.generateSessionId();
         this.isStreaming = false;
-        this.currentChatHistory = []; // 当前对话的消息历史
         this.chatHistories = this.loadChatHistoriesSync(); // 先从 localStorage 加载
         this.isCurrentChatFromHistory = false; // 标记当前对话是否是从历史记录加载的
+
+        // 先恢复当前聊天状态（如果有）
+        this.restoreCurrentChatState();
 
         this.initializeElements();
         this.bindEvents();
@@ -112,16 +113,162 @@ class SuperBizAgentApp {
         this.modeDropdown = document.getElementById('modeDropdown');
         this.currentModeText = document.getElementById('currentModeText');
         this.fileInput = document.getElementById('fileInput');
-        
+
         // 聊天区域元素
         this.chatMessages = document.getElementById('chatMessages');
         this.loadingOverlay = document.getElementById('loadingOverlay');
         this.chatContainer = document.querySelector('.chat-container');
         this.welcomeGreeting = document.getElementById('welcomeGreeting');
         this.chatHistoryList = document.getElementById('chatHistoryList');
-        
+
+        // 聊天标题栏元素
+        this.chatHeader = document.getElementById('chatHeader');
+        this.chatTitle = document.getElementById('chatTitle');
+        this.chatTitleInput = document.getElementById('chatTitleInput');
+        this.chatTitleEditBtn = document.getElementById('chatTitleEditBtn');
+        this.chatTitleSaveBtn = document.getElementById('chatTitleSaveBtn');
+        this.chatTitleCancelBtn = document.getElementById('chatTitleCancelBtn');
+
         // 初始化时检查是否需要居中
         this.checkAndSetCentered();
+
+        // 聊天标题栏事件
+        this.bindChatTitleEvents();
+    }
+
+    // 绑定聊天标题栏事件
+    bindChatTitleEvents() {
+        // 点击标题显示编辑框
+        if (this.chatTitle) {
+            this.chatTitle.addEventListener('click', () => this.showTitleEdit());
+        }
+
+        // 点击编辑按钮
+        if (this.chatTitleEditBtn) {
+            this.chatTitleEditBtn.addEventListener('click', () => this.showTitleEdit());
+        }
+
+        // 点击保存按钮
+        if (this.chatTitleSaveBtn) {
+            this.chatTitleSaveBtn.addEventListener('click', () => this.saveTitle());
+        }
+
+        // 点击取消按钮
+        if (this.chatTitleCancelBtn) {
+            this.chatTitleCancelBtn.addEventListener('click', () => this.cancelTitleEdit());
+        }
+
+        // 输入框按回车保存
+        if (this.chatTitleInput) {
+            this.chatTitleInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    this.saveTitle();
+                }
+            });
+        }
+    }
+
+    // 显示标题编辑框
+    showTitleEdit() {
+        if (!this.chatTitle || !this.chatTitleInput || !this.chatTitleEditBtn ||
+            !this.chatTitleSaveBtn || !this.chatTitleCancelBtn) {
+            return;
+        }
+
+        const currentTitle = this.chatTitle.textContent || '新对话';
+        this.chatTitleInput.value = currentTitle;
+        this.chatTitle.style.display = 'none';
+        this.chatTitleInput.style.display = 'inline-block';
+        this.chatTitleInput.focus();
+        this.chatTitleInput.select();
+        this.chatTitleEditBtn.style.display = 'none';
+        this.chatTitleSaveBtn.style.display = 'inline-flex';
+        this.chatTitleCancelBtn.style.display = 'inline-flex';
+    }
+
+    // 取消编辑
+    cancelTitleEdit() {
+        if (!this.chatTitle || !this.chatTitleInput || !this.chatTitleEditBtn ||
+            !this.chatTitleSaveBtn || !this.chatTitleCancelBtn) {
+            return;
+        }
+
+        this.chatTitle.style.display = 'inline-block';
+        this.chatTitleInput.style.display = 'none';
+        this.chatTitleEditBtn.style.display = 'inline-flex';
+        this.chatTitleSaveBtn.style.display = 'none';
+        this.chatTitleCancelBtn.style.display = 'none';
+    }
+
+    // 保存标题
+    async saveTitle() {
+        if (!this.chatTitle || !this.chatTitleInput || !this.chatTitleEditBtn ||
+            !this.chatTitleSaveBtn || !this.chatTitleCancelBtn) {
+            return;
+        }
+
+        const newTitle = this.chatTitleInput.value.trim();
+        if (!newTitle) {
+            this.showNotification('标题不能为空', 'warning');
+            return;
+        }
+
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/chat/session/${this.sessionId}/title`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ title: newTitle })
+            });
+
+            const result = await response.json();
+            if (result.code === 200) {
+                // 更新显示
+                this.chatTitle.textContent = newTitle;
+                // 隐藏编辑框
+                this.chatTitle.style.display = 'inline-block';
+                this.chatTitleInput.style.display = 'none';
+                this.chatTitleEditBtn.style.display = 'inline-flex';
+                this.chatTitleSaveBtn.style.display = 'none';
+                this.chatTitleCancelBtn.style.display = 'none';
+
+                // 更新侧边栏标题
+                const historyItem = this.chatHistories.find(h => h.id === this.sessionId);
+                if (historyItem) {
+                    historyItem.title = newTitle;
+                    this.saveChatHistories();
+                    this.renderChatHistory();
+                }
+
+                this.showNotification('标题已更新', 'success');
+            } else {
+                this.showNotification(result.message || '标题更新失败', 'error');
+            }
+        } catch (e) {
+            console.error('更新标题失败:', e);
+            this.showNotification('标题更新失败', 'error');
+        }
+    }
+
+    // 更新标题栏显示
+    updateChatHeader() {
+        if (!this.chatHeader || !this.chatTitle) {
+            return;
+        }
+
+        // 查找当前会话的标题
+        const historyItem = this.chatHistories.find(h => h.id === this.sessionId);
+        const title = historyItem ? historyItem.title : '新对话';
+
+        this.chatTitle.textContent = title;
+
+        // 有消息时显示标题栏
+        if (this.currentChatHistory.length > 0) {
+            this.chatHeader.style.display = 'flex';
+        } else {
+            this.chatHeader.style.display = 'none';
+        }
     }
 
     // 绑定事件监听器
@@ -257,7 +404,10 @@ class SuperBizAgentApp {
         
         // 清空当前对话历史
         this.currentChatHistory = [];
-        
+
+        // 清除保存的当前聊天状态
+        this.clearCurrentChatState();
+
         // 重置标记
         this.isCurrentChatFromHistory = false;
         
@@ -330,28 +480,30 @@ class SuperBizAgentApp {
         if (this.currentChatHistory.length === 0) {
             return;
         }
-        
+
         const existingIndex = this.chatHistories.findIndex(h => h.id === this.sessionId);
         if (existingIndex === -1) {
             // 如果不存在，调用保存方法
             this.saveCurrentChat();
             return;
         }
-        
+
         // 更新现有的历史记录
         const history = this.chatHistories[existingIndex];
         history.messages = [...this.currentChatHistory];
         history.updatedAt = new Date().toISOString();
-        
-        // 如果标题需要更新（第一条消息改变了）
-        const firstUserMessage = this.currentChatHistory.find(msg => msg.type === 'user');
-        if (firstUserMessage) {
-            const newTitle = firstUserMessage.content.substring(0, 30) + (firstUserMessage.content.length > 30 ? '...' : '');
-            if (history.title !== newTitle) {
+
+        // 只有当标题是默认的"新对话"时才根据第一条消息更新
+        // 手动修改的标题不会被覆盖
+        const isDefaultTitle = !history.title || history.title === '新对话';
+        if (isDefaultTitle) {
+            const firstUserMessage = this.currentChatHistory.find(msg => msg.type === 'user');
+            if (firstUserMessage) {
+                const newTitle = firstUserMessage.content.substring(0, 30) + (firstUserMessage.content.length > 30 ? '...' : '');
                 history.title = newTitle;
             }
         }
-        
+
         // 保存到localStorage
         this.saveChatHistories();
     }
@@ -447,7 +599,82 @@ class SuperBizAgentApp {
             console.error('保存历史对话失败:', e);
         }
     }
-    
+
+    // 保存当前聊天状态（用于刷新页面后恢复）
+    saveCurrentChatState() {
+        try {
+            const state = {
+                sessionId: this.sessionId,
+                currentChatHistory: this.currentChatHistory,
+                currentMode: this.currentMode,
+                savedAt: new Date().toISOString()
+            };
+            localStorage.setItem('currentChatState', JSON.stringify(state));
+        } catch (e) {
+            console.error('保存当前聊天状态失败:', e);
+        }
+    }
+
+    // 恢复当前聊天状态
+    restoreCurrentChatState() {
+        try {
+            const savedState = localStorage.getItem('currentChatState');
+            if (savedState) {
+                const state = JSON.parse(savedState);
+                // 检查状态是否太旧（超过24小时则不恢复）
+                const savedTime = new Date(state.savedAt);
+                const now = new Date();
+                const hoursDiff = (now - savedTime) / (1000 * 60 * 60);
+
+                if (hoursDiff < 24 && state.currentChatHistory && state.currentChatHistory.length > 0) {
+                    this.sessionId = state.sessionId || this.generateSessionId();
+                    this.currentChatHistory = state.currentChatHistory || [];
+                    this.currentMode = state.currentMode || 'quick';
+                    this.isCurrentChatFromHistory = false;
+
+                    // 渲染恢复的消息
+                    if (this.currentChatHistory.length > 0) {
+                        // 需要在 initializeElements 之后调用，所以延迟渲染
+                        setTimeout(() => {
+                            this.renderRestoredMessages();
+                        }, 0);
+                    }
+                } else {
+                    // 状态太旧或无效，生成新的
+                    this.sessionId = this.generateSessionId();
+                    this.currentChatHistory = [];
+                }
+            } else {
+                // 没有保存的状态
+                this.sessionId = this.generateSessionId();
+                this.currentChatHistory = [];
+            }
+        } catch (e) {
+            console.error('恢复当前聊天状态失败:', e);
+            this.sessionId = this.generateSessionId();
+            this.currentChatHistory = [];
+        }
+    }
+
+    // 渲染恢复的消息
+    renderRestoredMessages() {
+        if (this.chatMessages) {
+            this.chatMessages.innerHTML = '';
+            this.currentChatHistory.forEach(msg => {
+                this.addMessage(msg.type, msg.content, false, false);
+            });
+        }
+    }
+
+    // 清除当前聊天状态（开始新对话时调用）
+    clearCurrentChatState() {
+        try {
+            localStorage.removeItem('currentChatState');
+        } catch (e) {
+            console.error('清除当前聊天状态失败:', e);
+        }
+    }
+
     // 渲染历史对话列表
     renderChatHistory() {
         if (!this.chatHistoryList) {
@@ -495,12 +722,12 @@ class SuperBizAgentApp {
     }
     
     // 加载历史对话
-    loadChatHistory(historyId) {
+    async loadChatHistory(historyId) {
         const history = this.chatHistories.find(h => h.id === historyId);
         if (!history) {
             return;
         }
-        
+
         // 如果当前有对话内容，且不是同一个对话，先保存
         if (this.currentChatHistory.length > 0 && this.sessionId !== historyId) {
             if (this.isCurrentChatFromHistory) {
@@ -511,31 +738,105 @@ class SuperBizAgentApp {
                 this.saveCurrentChat();
             }
         }
-        
+
         // 加载历史对话
         this.sessionId = history.id;
-        this.currentChatHistory = [...history.messages];
         this.isCurrentChatFromHistory = true; // 标记为从历史记录加载
-        
-        // 清空并重新渲染消息
-        if (this.chatMessages) {
-            this.chatMessages.innerHTML = '';
-            history.messages.forEach(msg => {
-                this.addMessage(msg.type, msg.content, false, false); // false表示不是流式，false表示不保存到历史（因为已经存在）
-            });
+
+        // 从后端获取会话信息（包含标题）
+        let sessionTitle = history.title || '新对话';
+        try {
+            const sessionResponse = await fetch(`${this.apiBaseUrl}/chat/session/${historyId}`);
+            const sessionResult = await sessionResponse.json();
+            if (sessionResult.code === 200 && sessionResult.data) {
+                sessionTitle = sessionResult.data.title || sessionTitle;
+                // 更新本地标题（如果后端有新标题）
+                if (history.title !== sessionTitle) {
+                    history.title = sessionTitle;
+                    this.saveChatHistories();
+                    this.renderChatHistory();
+                }
+            }
+        } catch (e) {
+            console.error('获取会话信息失败:', e);
         }
-        
+
+        // 如果本地有消息，直接使用；否则从后端获取
+        if (history.messages && history.messages.length > 0) {
+            this.currentChatHistory = [...history.messages];
+            this.renderMessages(this.currentChatHistory);
+        } else {
+            // 从后端获取消息
+            try {
+                const response = await fetch(`${this.apiBaseUrl}/chat/session/${historyId}/messages?limit=100`);
+                const result = await response.json();
+
+                if (result.code === 200 && result.data) {
+                    // 转换后端消息格式
+                    this.currentChatHistory = result.data.map(msg => ({
+                        type: msg.type || msg.role,
+                        content: msg.content,
+                        timestamp: msg.timestamp
+                    }));
+
+                    // 更新本地存储的消息
+                    history.messages = [...this.currentChatHistory];
+                    this.saveChatHistories();
+
+                    this.renderMessages(this.currentChatHistory);
+                } else {
+                    this.currentChatHistory = [];
+                    this.renderMessages([]);
+                }
+            } catch (e) {
+                console.error('加载会话消息失败:', e);
+                this.currentChatHistory = [];
+                this.renderMessages([]);
+            }
+        }
+
+        // 更新当前聊天状态（这样刷新时会恢复到加载的历史记录）
+        this.saveCurrentChatState();
+
         // 更新UI
         this.checkAndSetCentered();
         this.renderChatHistory();
     }
+
+    // 渲染消息列表
+    renderMessages(messages) {
+        if (this.chatMessages) {
+            this.chatMessages.innerHTML = '';
+            messages.forEach(msg => {
+                this.addMessage(msg.type, msg.content, false, false);
+            });
+        }
+        // 更新标题栏
+        this.updateChatHeader();
+    }
     
-    // 删除历史对话
-    deleteChatHistory(historyId) {
+    // 删除历史对话（软删除）
+    async deleteChatHistory(historyId) {
+        // 先从本地列表中移除
         this.chatHistories = this.chatHistories.filter(h => h.id !== historyId);
         this.saveChatHistories();
         this.renderChatHistory();
-        
+
+        // 调用后端API进行软删除
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/chat/session/${historyId}`, {
+                method: 'DELETE'
+            });
+            const result = await response.json();
+            if (result.code === 200) {
+                console.log('会话已软删除:', historyId);
+            } else {
+                console.error('删除会话失败:', result.message);
+            }
+        } catch (e) {
+            console.error('删除会话请求失败:', e);
+        }
+
         // 如果删除的是当前对话，清空当前对话
         if (this.sessionId === historyId) {
             this.currentChatHistory = [];
@@ -543,6 +844,8 @@ class SuperBizAgentApp {
                 this.chatMessages.innerHTML = '';
             }
             this.sessionId = this.generateSessionId();
+            // 清除保存的当前聊天状态
+            this.clearCurrentChatState();
             this.checkAndSetCentered();
         }
     }
@@ -888,6 +1191,8 @@ class SuperBizAgentApp {
                 content: content,
                 timestamp: new Date().toISOString()
             });
+            // 保存当前聊天状态
+            this.saveCurrentChatState();
         }
         
         const messageDiv = document.createElement('div');
@@ -911,7 +1216,7 @@ class SuperBizAgentApp {
 
         const messageContent = document.createElement('div');
         messageContent.className = 'message-content';
-        
+
         // 如果是assistant消息且不是流式消息，使用Markdown渲染
         if (type === 'assistant' && !isStreaming) {
             messageContent.innerHTML = this.renderMarkdown(content);
@@ -923,6 +1228,26 @@ class SuperBizAgentApp {
         }
 
         messageContentWrapper.appendChild(messageContent);
+
+        // 如果是assistant消息且不是流式消息，添加反馈按钮
+        if (type === 'assistant' && !isStreaming && content) {
+            const feedbackActions = document.createElement('div');
+            feedbackActions.className = 'feedback-actions';
+            feedbackActions.innerHTML = `
+                <button class="feedback-btn" data-feedback="dislike" title="反馈不满意">
+                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z" fill="currentColor"/>
+                    </svg>
+                    <span>反馈</span>
+                </button>
+            `;
+            messageContentWrapper.appendChild(feedbackActions);
+
+            // 绑定反馈按钮事件
+            const feedbackBtn = feedbackActions.querySelector('.feedback-btn');
+            feedbackBtn.addEventListener('click', (e) => this.submitFeedback(content, e.target));
+        }
+
         messageDiv.appendChild(messageContentWrapper);
 
         if (this.chatMessages) {
@@ -1027,6 +1352,26 @@ class SuperBizAgentApp {
                 // 高亮代码块
                 this.highlightCodeBlocks(messageContent);
             }
+
+            // 流式完成后添加反馈按钮
+            const messageContentWrapper = assistantMessageElement.querySelector('.message-content-wrapper');
+            if (messageContentWrapper && !messageContentWrapper.querySelector('.feedback-actions')) {
+                const feedbackActions = document.createElement('div');
+                feedbackActions.className = 'feedback-actions';
+                feedbackActions.innerHTML = `
+                    <button class="feedback-btn" data-feedback="dislike" title="反馈不满意">
+                        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z" fill="currentColor"/>
+                        </svg>
+                        <span>反馈</span>
+                    </button>
+                `;
+                messageContentWrapper.appendChild(feedbackActions);
+
+                // 绑定反馈按钮事件
+                const feedbackBtn = feedbackActions.querySelector('.feedback-btn');
+                feedbackBtn.addEventListener('click', (e) => this.submitFeedback(fullResponse, e.target));
+            }
         }
         // 保存流式消息到历史记录
         if (fullResponse) {
@@ -1035,6 +1380,8 @@ class SuperBizAgentApp {
                 content: fullResponse,
                 timestamp: new Date().toISOString()
             });
+            // 保存当前聊天状态
+            this.saveCurrentChatState();
             // 如果当前对话是从历史记录加载的，更新历史记录
             if (this.isCurrentChatFromHistory) {
                 this.updateCurrentChatHistory();
@@ -1424,14 +1771,35 @@ class SuperBizAgentApp {
         // 高亮代码块
         this.highlightCodeBlocks(messageContent);
         console.log('代码块高亮完成');
-        
+
+        // 添加反馈按钮（如果没有）
+        if (!messageContentWrapper.querySelector('.feedback-actions')) {
+            const feedbackActions = document.createElement('div');
+            feedbackActions.className = 'feedback-actions';
+            feedbackActions.innerHTML = `
+                <button class="feedback-btn" data-feedback="dislike" title="反馈不满意">
+                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z" fill="currentColor"/>
+                    </svg>
+                    <span>反馈</span>
+                </button>
+            `;
+            messageContentWrapper.appendChild(feedbackActions);
+
+            // 绑定反馈按钮事件
+            const feedbackBtn = feedbackActions.querySelector('.feedback-btn');
+            feedbackBtn.addEventListener('click', (e) => this.submitFeedback(response, e.target));
+        }
+
         // 保存到历史记录
         this.currentChatHistory.push({
             type: 'assistant',
             content: response,
             timestamp: new Date().toISOString()
         });
-        
+        // 保存当前聊天状态
+        this.saveCurrentChatState();
+
         this.scrollToBottom();
         return messageElement;
     }
@@ -1471,7 +1839,7 @@ class SuperBizAgentApp {
 
             const detailsContent = document.createElement('div');
             detailsContent.className = 'details-content';
-            
+
             details.forEach((detail, index) => {
                 const detailItem = document.createElement('div');
                 detailItem.className = 'detail-item';
@@ -1497,12 +1865,39 @@ class SuperBizAgentApp {
         // 高亮代码块
         this.highlightCodeBlocks(messageContent);
         messageContentWrapper.appendChild(messageContent);
+
+        // 添加反馈按钮（AIOps消息）
+        const feedbackActions = document.createElement('div');
+        feedbackActions.className = 'feedback-actions';
+        feedbackActions.innerHTML = `
+            <button class="feedback-btn" data-feedback="dislike" title="反馈不满意">
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z" fill="currentColor"/>
+                </svg>
+                <span>反馈</span>
+            </button>
+        `;
+        messageContentWrapper.appendChild(feedbackActions);
+
+        // 绑定反馈按钮事件
+        const feedbackBtn = feedbackActions.querySelector('.feedback-btn');
+        feedbackBtn.addEventListener('click', (e) => this.submitFeedback(response, e.target));
+
         messageDiv.appendChild(messageContentWrapper);
-        
+
         if (this.chatMessages) {
             this.chatMessages.appendChild(messageDiv);
             this.scrollToBottom();
         }
+
+        // 保存到当前对话历史
+        this.currentChatHistory.push({
+            type: 'assistant',
+            content: response,
+            timestamp: new Date().toISOString()
+        });
+        // 保存当前聊天状态
+        this.saveCurrentChatState();
 
         return messageDiv;
     }
@@ -1512,6 +1907,56 @@ class SuperBizAgentApp {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    }
+
+    // 提交用户反馈
+    async submitFeedback(answer, feedbackBtn) {
+        // 如果传入了按钮，先禁用它防止重复点击
+        if (feedbackBtn) {
+            feedbackBtn.disabled = true;
+            feedbackBtn.style.opacity = '0.5';
+            feedbackBtn.style.cursor = 'not-allowed';
+        }
+
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/feedback`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    sessionId: this.sessionId,
+                    answer: answer,
+                    feedback: 'dislike',
+                    timestamp: new Date().toISOString()
+                })
+            });
+
+            if (response.ok) {
+                this.showNotification('感谢您的反馈，我们会继续改进！', 'success');
+                // 如果成功，保持按钮禁用状态（用户已反馈）
+                if (feedbackBtn) {
+                    feedbackBtn.innerHTML = '<span>已反馈</span>';
+                }
+            } else {
+                this.showNotification('反馈提交失败，请稍后再试', 'warning');
+                // 失败时恢复按钮
+                if (feedbackBtn) {
+                    feedbackBtn.disabled = false;
+                    feedbackBtn.style.opacity = '1';
+                    feedbackBtn.style.cursor = 'pointer';
+                }
+            }
+        } catch (error) {
+            console.error('提交反馈失败:', error);
+            this.showNotification('反馈提交失败，请稍后再试', 'warning');
+            // 失败时恢复按钮
+            if (feedbackBtn) {
+                feedbackBtn.disabled = false;
+                feedbackBtn.style.opacity = '1';
+                feedbackBtn.style.cursor = 'pointer';
+            }
+        }
     }
 
     // 触发智能运维（点击智能运维按钮时直接调用）

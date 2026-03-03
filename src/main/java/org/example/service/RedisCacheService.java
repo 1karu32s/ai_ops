@@ -7,6 +7,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.serializer.RedisSerializer;
 import org.springframework.scripting.support.ResourceScriptSource;
@@ -28,6 +29,7 @@ public class RedisCacheService {
     private int expireDays;
 
     private final RedisTemplate<String, Object> redisTemplate;
+    private final StringRedisTemplate stringRedisTemplate;
     private final ObjectMapper objectMapper;
 
     // Lua 脚本：添加消息
@@ -36,10 +38,12 @@ public class RedisCacheService {
     private static final String SESSION_KEY_PREFIX = "session:";
     private static final String MESSAGES_KEY_SUFFIX = ":messages";
     private static final String RECENT_SESSIONS_KEY = "sessions:recent";
+    private static final String DELETED_SESSIONS_KEY = "sessions:deleted"; // 软删除的会话ID集合
     private static final long DEFAULT_TTL_SECONDS = 604800; // 7天
 
-    public RedisCacheService(RedisTemplate<String, Object> redisTemplate, ObjectMapper objectMapper) {
+    public RedisCacheService(RedisTemplate<String, Object> redisTemplate, StringRedisTemplate stringRedisTemplate, ObjectMapper objectMapper) {
         this.redisTemplate = redisTemplate;
+        this.stringRedisTemplate = stringRedisTemplate;
         this.objectMapper = objectMapper;
     }
 
@@ -67,8 +71,8 @@ public class RedisCacheService {
         redisTemplate.opsForHash().putAll(sessionKey, sessionData);
         redisTemplate.expire(sessionKey, expireDays, TimeUnit.DAYS);
 
-        // 添加到最近会话列表
-        redisTemplate.opsForZSet().add(RECENT_SESSIONS_KEY, sessionId, System.currentTimeMillis());
+        // 添加到最近会话列表（使用 StringRedisTemplate 确保一致性）
+        stringRedisTemplate.opsForZSet().add(RECENT_SESSIONS_KEY, sessionId, System.currentTimeMillis());
 
         log.debug("创建会话: {}", sessionId);
     }
@@ -81,21 +85,27 @@ public class RedisCacheService {
         Map<Object, Object> data = redisTemplate.opsForHash().entries(sessionKey);
 
         if (data.isEmpty()) {
+            log.debug("Redis中未找到会话: {}", sessionId);
             return null;
         }
 
         SessionMetadata metadata = new SessionMetadata();
         metadata.setSessionId(sessionId);
 
-        // 【修复 1】安全转换 title
+        // 【修复 1】安全转换 title - 使用 "新对话" 作为默认值
         Object titleObj = data.get("title");
-        metadata.setTitle(titleObj != null ? String.valueOf(titleObj) : "New Chat");
+        String title = titleObj != null ? String.valueOf(titleObj) : null;
+        if (title == null || title.isEmpty() || "null".equals(title)) {
+            title = "新对话";
+        }
+        metadata.setTitle(title);
 
         // 【修复 2】关键修复：使用 String.valueOf 防止 Integer 强转 String 报错
         metadata.setMessageCount(Integer.parseInt(String.valueOf(data.getOrDefault("messageCount", "0"))));
         metadata.setCreateTime(Long.parseLong(String.valueOf(data.getOrDefault("createTime", "0"))));
         metadata.setUpdateTime(Long.parseLong(String.valueOf(data.getOrDefault("updateTime", "0"))));
 
+        log.debug("获取会话元数据: sessionId={}, title={}", sessionId, metadata.getTitle());
         return metadata;
     }
 
@@ -185,7 +195,39 @@ public class RedisCacheService {
     }
 
     /**
-     * 删除会话
+     * 软删除会话（标记为已删除）
+     */
+    public void softDeleteSession(String sessionId) {
+        // 将会话ID添加到已删除集合
+        stringRedisTemplate.opsForSet().add(DELETED_SESSIONS_KEY, sessionId);
+        // 从最近会话列表中移除
+        stringRedisTemplate.opsForZSet().remove(RECENT_SESSIONS_KEY, sessionId);
+
+        log.info("软删除会话: {}", sessionId);
+    }
+
+    /**
+     * 检查会话是否已删除
+     */
+    public boolean isDeleted(String sessionId) {
+        return stringRedisTemplate.opsForSet().isMember(DELETED_SESSIONS_KEY, sessionId);
+    }
+
+    /**
+     * 获取已删除的会话ID集合
+     */
+    public Set<String> getDeletedSessionIds() {
+        try {
+            Set<String> members = stringRedisTemplate.opsForSet().members(DELETED_SESSIONS_KEY);
+            return members != null ? members : Collections.emptySet();
+        } catch (Exception e) {
+            log.error("获取已删除会话列表失败", e);
+            return Collections.emptySet();
+        }
+    }
+
+    /**
+     * 删除会话（硬删除）
      */
     public void deleteSession(String sessionId) {
         String sessionKey = SESSION_KEY_PREFIX + sessionId;
@@ -193,22 +235,33 @@ public class RedisCacheService {
 
         redisTemplate.delete(sessionKey);
         redisTemplate.delete(messagesKey);
-        redisTemplate.opsForZSet().remove(RECENT_SESSIONS_KEY, sessionId);
+        stringRedisTemplate.opsForZSet().remove(RECENT_SESSIONS_KEY, sessionId);
 
         log.debug("删除会话: {}", sessionId);
     }
 
     /**
-     * 获取最近会话列表
+     * 获取最近会话列表（排除已删除的）
      */
     public List<String> getRecentSessions(int limit) {
-        Set<Object> members = redisTemplate.opsForZSet().reverseRange(RECENT_SESSIONS_KEY, 0, limit - 1);
-        if (members == null) {
+        try {
+            // 获取已删除的会话ID
+            Set<String> deletedIds = getDeletedSessionIds();
+
+            // 使用 StringRedisTemplate 确保返回的是 String 类型
+            Set<String> members = stringRedisTemplate.opsForZSet().reverseRange(RECENT_SESSIONS_KEY, 0, limit - 1);
+            if (members == null) {
+                return Collections.emptyList();
+            }
+
+            // 过滤掉已删除的会话
+            return members.stream()
+                    .filter(id -> !deletedIds.contains(id))
+                    .toList();
+        } catch (Exception e) {
+            log.error("获取最近会话列表失败", e);
             return Collections.emptyList();
         }
-        return members.stream()
-                .map(Object::toString)
-                .toList();
     }
 
     /**

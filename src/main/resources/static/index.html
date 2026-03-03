@@ -50,6 +50,21 @@
                 <span>AI Ops</span>
             </button>
             <div class="chat-container">
+                <!-- 聊天标题栏 -->
+                <div class="chat-header" id="chatHeader" style="display: none;">
+                    <div class="chat-title-wrapper">
+                        <span class="chat-title" id="chatTitle" title="点击修改标题">新对话</span>
+                        <input type="text" class="chat-title-input" id="chatTitleInput" placeholder="输入新标题" style="display: none;">
+                        <button class="chat-title-edit-btn" id="chatTitleEditBtn" title="修改标题">
+                            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                        </button>
+                        <button class="chat-title-save-btn" id="chatTitleSaveBtn" style="display: none;">保存</button>
+                        <button class="chat-title-cancel-btn" id="chatTitleCancelBtn" style="display: none;">取消</button>
+                    </div>
+                </div>
                 <div class="welcome-greeting" id="welcomeGreeting">
                     <p>你好！我是智能Oncall小助手</p>
                 </div>
