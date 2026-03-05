@@ -14,7 +14,7 @@
 
 ## 🚀 核心特性
 
-- ✅ **RAG 问答**: 向量检索 + 多轮对话 + 流式输出
+- ✅ **RAG 问答**: 向量检索 + Rerank 重排 + 多轮对话 + 流式输出 ⭐ UPDATED
 - ✅ **AIOps 运维**: 智能诊断 + 多 Agent 协作 + 自动报告
 - ✅ **工具集成**: 文档检索、告警查询、日志分析、时间工具
 - ✅ **会话持久化**: Redis + MySQL 混合存储，异步写入，高并发优化
@@ -34,7 +34,7 @@
 | Spring Boot | 3.2.0 | 应用框架 |
 | MyBatis-Plus | 3.5.9 | ORM 框架 |
 | Spring AI | - | AI Agent 框架 |
-| DashScope | 2.17.0 | 阿里云 AI 服务 |
+| DashScope | 2.22.10 | 阿里云 AI 服务（含Rerank重排） |
 | Milvus | 2.6.10 | 向量数据库 |
 | Redis | - | 缓存数据库 |
 | MySQL | 8.0+ | 关系型数据库 |
@@ -414,6 +414,31 @@ curl http://localhost:9900/milvus/health
 ```
 
 ## 📈 更新日志
+
+### v1.5.0 (2026-03-05)
+
+**新增功能：**
+- ✨ **Rerank 重排服务**: 使用阿里云百炼 gte-rerank 模型对向量检索结果进行语义重排
+
+**技术优化：**
+- 🔧 升级 DashScope SDK: 2.17.0 → 2.22.10（支持 Rerank API）
+- 🔧 新增 RerankService: 使用 SDK 方式调用重排服务
+- 🔧 VectorSearchService 集成重排: 召回阶段多取 3 倍结果 → Rerank重排 → 返回 topK
+
+**检索流程：**
+```
+用户问题 → 向量化 → Milvus 召回(topK*3) → Rerank重排(topK) → 返回结果
+```
+
+**配置新增：**
+```yaml
+dashscope:
+  rerank:
+    model: "gte-rerank"
+    top-n: 3
+```
+
+### v1.4.0 (2026-03-03)
 
 ### v1.4.0 (2026-03-03)
 

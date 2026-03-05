@@ -3,7 +3,10 @@
     "allow": [
       "Bash(mvn clean compile -DskipTests)",
       "Bash(mvn compile -q)",
-      "WebFetch(domain:minimax-algeng-chat-tts.oss-cn-wulanchabu.aliyuncs.com)"
+      "WebFetch(domain:minimax-algeng-chat-tts.oss-cn-wulanchabu.aliyuncs.com)",
+      "WebFetch(domain:open.feishu.cn)",
+      "WebFetch(domain:docs.anthropic.com)",
+      "Bash(mvn dependency:tree -Dincludes=com.alibaba:dashscope-sdk-java)"
     ]
   }
 }

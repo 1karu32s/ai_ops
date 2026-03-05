@@ -97,6 +97,10 @@ document:
 rag:
   top-k: 3  # 检索返回的最相似文档数量
   model: "qwen3-max"  # 大语言模型名称
+  rerank:
+    enabled: true  # 是否启用 Rerank 重排
+    model: "gte-rerank"  # Rerank 模型
+    top-n: 3  # Rerank 返回数量
 
 # Prometheus 配置
 prometheus:

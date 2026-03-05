@@ -20,7 +20,7 @@ import java.util.Set;
 
 /**
  * 向量搜索服务
- * 负责从 Milvus 中搜索相似向量
+ * 负责从 Milvus 中搜索相似向量，并使用 Rerank 进行重排
  */
 @Service
 public class VectorSearchService {
@@ -36,8 +36,11 @@ public class VectorSearchService {
     @Autowired
     private DocMetadataService docMetadataService;
 
+    @Autowired
+    private RerankService rerankService;
+
     /**
-     * 搜索相似文档（只返回活跃版本）
+     * 搜索相似文档（只返回活跃版本）+ Rerank 重排
      *
      * @param query 查询文本
      * @param topK 返回最相似的K个结果
@@ -55,12 +58,13 @@ public class VectorSearchService {
             List<Float> queryVector = embeddingService.generateQueryVector(query);
             logger.debug("查询向量生成成功, 维度: {}", queryVector.size());
 
-            // 3. 构建搜索参数（多取一些，后续过滤）
+            // 3. 构建搜索参数（多取一些，用于 Rerank）
+            int recallTopK = topK * 3; // 召回阶段多取一些
             SearchParam searchParam = SearchParam.newBuilder()
                     .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
                     .withVectorFieldName("vector")
                     .withVectors(Collections.singletonList(queryVector))
-                    .withTopK(topK * 2)  // 多取一些，后续过滤
+                    .withTopK(recallTopK)  // 多取一些，用于 Rerank
                     .withMetricType(io.milvus.param.MetricType.L2)
                     .withOutFields(List.of("id", "content", "metadata"))
                     .withParams("{\"nprobe\":10}")
@@ -99,14 +103,55 @@ public class VectorSearchService {
                 Long versionId = extractVersionId(result.getMetadata());
                 if (versionId == null || activeVersionIds.contains(versionId)) {
                     filteredResults.add(result);
-                    if (filteredResults.size() >= topK) {
-                        break;
-                    }
                 }
             }
 
-            logger.info("搜索完成, 原始结果: {}, 过滤后: {}", allResults.size(), filteredResults.size());
-            return filteredResults;
+            logger.info("向量召回完成, 召回数量: {}, 过滤后: {}", allResults.size(), filteredResults.size());
+
+            // 打印召回结果（用于调试）
+            for (int i = 0; i < Math.min(5, filteredResults.size()); i++) {
+                SearchResult sr = filteredResults.get(i);
+                String preview = sr.getContent() != null ?
+                    (sr.getContent().length() > 50 ? sr.getContent().substring(0, 50) + "..." : sr.getContent()) : "";
+                logger.info("  [召回] #{}/{} score={} content={}",
+                    i + 1, filteredResults.size(), sr.getScore(), preview);
+            }
+
+            // 7. Rerank 重排
+            if (filteredResults.size() > topK) {
+                logger.info("开始 Rerank 重排, 待重排数量: {}", filteredResults.size());
+                List<String> documents = filteredResults.stream()
+                        .map(SearchResult::getContent)
+                        .toList();
+
+                List<RerankService.RerankResultItem> reranked = rerankService.rerank(query, documents);
+
+                // 8. 组装重排后的结果
+                List<SearchResult> finalResults = new ArrayList<>();
+                for (RerankService.RerankResultItem rr : reranked) {
+                    int originalIndex = rr.getIndex();
+                    if (originalIndex < filteredResults.size()) {
+                        SearchResult sr = filteredResults.get(originalIndex);
+                        sr.setScore((float) rr.getRelevanceScore()); // 使用 Rerank 分数
+                        finalResults.add(sr);
+                    }
+                }
+
+                // 打印重排结果（用于调试）
+                logger.info("Rerank 重排完成, 最终返回: {} 条", finalResults.size());
+                for (int i = 0; i < finalResults.size(); i++) {
+                    SearchResult sr = finalResults.get(i);
+                    String preview = sr.getContent() != null ?
+                        (sr.getContent().length() > 50 ? sr.getContent().substring(0, 50) + "..." : sr.getContent()) : "";
+                    logger.info("  [重排] #{}/{} rerank_score={} content={}",
+                        i + 1, finalResults.size(), sr.getScore(), preview);
+                }
+
+                return finalResults;
+            }
+
+            // 不需要重排，直接返回
+            return filteredResults.stream().limit(topK).toList();
 
         } catch (Exception e) {
             logger.error("搜索相似文档失败", e);
