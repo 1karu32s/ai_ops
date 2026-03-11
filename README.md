@@ -45,10 +45,13 @@
 ```
 SuperBizAgent/
 ├── src/main/java/org/example/
+│   ├── Main.java                    # 启动类
 │   ├── controller/
-│   │   ├── ChatController.java        # 统一接口控制器 ⭐
-│   │   ├── FileUploadController.java  # 文件上传控制器 ⭐
-│   │   └── MonitorController.java     # 监控接口控制器 ⭐ NEW
+│   │   ├── ChatController.java        # 统一对话接口 ⭐
+│   │   ├── FileUploadController.java  # 文件上传接口 ⭐
+│   │   ├── FeedbackController.java   # 用户反馈接口 ⭐
+│   │   ├── MilvusCheckController.java # Milvus 健康检查
+│   │   └── MonitorController.java     # 监控接口 ⭐
 │   ├── service/
 │   │   ├── ChatService.java           # 对话服务 ⭐
 │   │   ├── ConversationService.java  # 对话持久化服务 ⭐
@@ -57,17 +60,28 @@ SuperBizAgent/
 │   │   ├── RedisCacheService.java     # Redis 缓存服务 ⭐
 │   │   ├── AiOpsService.java          # AIOps 服务 ⭐
 │   │   ├── RagService.java            # RAG 服务
-│   │   └── Vector*.java               # 向量服务
+│   │   ├── RerankService.java       # 重排服务 ⭐
+│   │   ├── VectorIndexService.java  # 向量索引 ⭐
+│   │   ├── VectorSearchService.java # 向量搜索
+│   │   ├── VectorEmbeddingService.java # 向量生成
+│   │   ├── DocMetadataService.java # 文档元数据 ⭐
+│   │   ├── UserFeedbackService.java # 用户反馈 ⭐
+│   │   └── DocumentChunkService.java # 文档分片
+│   │   ├── service/impl/
+│   │   ├── service/impl/
+│   │   │   └── DocMetadataServiceImpl.java # 文档服务实现 ⭐
 │   ├── entity/                         # 实体类
 │   │   ├── ChatSession.java           # 会话实体 ⭐
 │   │   ├── ChatMessage.java           # 消息实体 ⭐
 │   │   ├── ChatSummary.java           # 摘要实体 ⭐ NEW
-│   │   └── DocMetadata.java           # 文档元数据 ⭐
+│   │   ├── DocMetadata.java           # 文档元数据 ⭐
+│   │   └── UserFeedback.java        # 用户反馈 ⭐
 │   ├── mapper/                         # MyBatis Mapper
 │   │   ├── ChatSessionMapper.java     # 会话 Mapper ⭐
 │   │   ├── ChatMessageMapper.java     # 消息 Mapper ⭐
 │   │   ├── ChatSummaryMapper.java     # 摘要 Mapper ⭐ NEW
-│   │   └── DocMetadataMapper.java     # 文档 Mapper ⭐
+│   │   ├── DocMetadataMapper.java     # 文档 Mapper ⭐
+│   │   └── UserFeedbackMapper.java  # 反馈 Mapper ⭐
 │   ├── agent/tool/                    # Agent 工具集
 │   │   ├── DateTimeTools.java         # 时间工具
 │   │   ├── InternalDocsTools.java     # 文档检索
@@ -77,7 +91,21 @@ SuperBizAgent/
 │   │   ├── RedisConfig.java           # Redis 配置 ⭐
 │   │   ├── AsyncConfig.java           # 异步任务配置 ⭐ NEW
 │   │   ├── ThreadPoolConfig.java      # 统一线程池配置 ⭐ NEW
-│   │   └── DocumentChunkConfig.java   # 文档分片配置
+│   │   ├── DocumentChunkConfig.java   # 文档分片配置
+│   │   ├── FileUploadConfig.java   # 文件上传配置
+│   │   ├── WebConfig.java          # Web 配置
+│   │   └── WebMvcConfig.java       # Web MVC 配置
+│   ├── client/
+│   │   └── MilvusClientFactory.java # Milvus 客户端工厂
+│   ├── constant/
+│   │   └── MilvusConstants.java    # Milvus 常量
+│   ├── dto/
+│   │   ├── AIOpsRequest.java     # AIOps 请求
+│   │   ├── DocumentChunk.java    # 文档分片
+│   │   ├── FileUploadRes.java    # 文件上传响应
+│   │   └── FeedbackRequest.java   # 反馈请求
+│   └── tool/
+│       └── DropCollection.java    # 删集合工具
 │   └── util/
 │       └── FileUpdateLockManager.java # 文件更新锁管理 ⭐
 ├── src/main/resources/
@@ -285,7 +313,7 @@ curl http://localhost:9900/milvus/health
 
 ## 📊 架构亮点
 
-### 对话持久化架构 ⭐ NEW
+### 对话持久化架构 ⭐ UPDATED
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -295,10 +323,19 @@ curl http://localhost:9900/milvus/health
 │   写入流程:                                                      │
 │   用户请求 → Redis 同步写入 (~1-3ms) → 返回响应                │
 │                → MySQL 异步写入 (不阻塞)                       │
+│                     ↓ 失败                                     │
+│                记录 sessionId 到 failed_sessions 集合          │
 │                                                                  │
 │   读取流程:                                                      │
 │   请求 → Redis 命中 → 直接返回                                  │
-│        Redis 未命中 → MySQL 查询 → 回填 Redis → 返回          │
+│        Redis 未命中 → MySQL 查询 → 回填 Redis → 返回            │
+│                                                                  │
+│   定时同步:                                                      │
+│   每5分钟扫描 failed_sessions → 重试同步失败会话                │
+│   分布式锁防止多实例并发                                          │
+│                                                                  │
+│   事务修复:                                                      │
+│   抽取 MessagePersistService 避免 Spring 代理自调用失效          │
 │                                                                  │
 │   性能优化:                                                      │
 │   • Lua 脚本原子操作                                           │
@@ -309,18 +346,26 @@ curl http://localhost:9900/milvus/health
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 文件版本控制 ⭐
+### 文件版本控制 ⭐ UPDATED
 
 ```
 上传新文件 → MD5 校验
     ↓
-  内容相同？ → 跳过处理
+  内容相同？ → 跳过处理（去重）
     ↓ 否
-  创建新版本 (status=0, is_current=false)
+  创建新版本 (status=publishing, is_current=false)
     ↓
-  向量化 + 索引 Milvus
+  异步向量化 → 检查 filename+md5+is_current
     ↓
-  完成后切换版本 → is_current=true
+  获取文件名锁 → 写入 Milvus
+    ↓
+  软切换版本 → 旧版本 is_current=false, 新版本 is_current=true
+
+场景:
+• 不同文件名 + 不同内容 → 直接上传
+• 同文件名 + 不同内容 → 增量更新 + 软切换
+• 同文件名 + 相同内容 → 跳过，节省空间
+• 多用户同文件 → 分布式锁，不冲突
 ```
 
 ### 线程池优化架构 ⭐ NEW
