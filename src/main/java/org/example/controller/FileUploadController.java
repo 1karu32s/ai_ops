@@ -1,12 +1,10 @@
 package org.example.controller;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import org.example.config.FileUploadConfig;
 import org.example.dto.FileUploadRes;
 import org.example.entity.DocMetadata;
 import org.example.service.DocMetadataService;
 import org.example.service.VectorIndexService;
-import org.example.util.FileUpdateLockManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -42,14 +40,12 @@ public class FileUploadController {
     private DocMetadataService docMetadataService;
 
     @Autowired
-    private FileUpdateLockManager lockManager;
-
-    @Autowired
     @org.springframework.beans.factory.annotation.Qualifier("vectorExecutor")
     private Executor vectorExecutor;
 
     @PostMapping(value = "/api/upload", consumes = "multipart/form-data")
     public ResponseEntity<?> upload(@RequestParam("file") MultipartFile file) {
+        // 1. 格式校验
         if (file.isEmpty()) {
             return ResponseEntity.badRequest().body("文件不能为空");
         }
@@ -65,9 +61,9 @@ public class FileUploadController {
                     .body("不支持的文件格式，仅支持: " + fileUploadConfig.getAllowedExtensions());
         }
 
-        // 获取文件锁（防止并发冲突）
-        FileUpdateLockManager.FileLock lock = lockManager.acquireLock(originalFilename);
-
+        // 2. 保存文件到磁盘
+        Path filePath;
+        String md5Hash;
         try {
             String uploadPath = fileUploadConfig.getPath();
             Path uploadDir = Paths.get(uploadPath).normalize();
@@ -75,8 +71,7 @@ public class FileUploadController {
                 Files.createDirectories(uploadDir);
             }
 
-            // 使用原始文件名
-            Path filePath = uploadDir.resolve(originalFilename).normalize();
+            filePath = uploadDir.resolve(originalFilename).normalize();
 
             // 如果文件已存在，先删除旧文件（覆盖磁盘文件）
             if (Files.exists(filePath)) {
@@ -89,46 +84,8 @@ public class FileUploadController {
             logger.info("文件上传成功: {}", filePath);
 
             // 计算 MD5
-            String md5Hash = calculateMd5(filePath);
+            md5Hash = calculateMd5(filePath);
             logger.info("文件 MD5: {}", md5Hash);
-
-            // 检查是否已存在相同内容的活跃版本
-            DocMetadata existing = docMetadataService.getByFileNameAndMd5(originalFilename, md5Hash);
-            if (existing != null && existing.getIsCurrent()) {
-                logger.info("文件内容未变化，跳过处理: {}", originalFilename);
-                return ResponseEntity.ok(createResponse("文件未变化，跳过处理", originalFilename, filePath, file.getSize()));
-            }
-
-            // 创建新版本记录（status=0 publishing, is_current=false）
-            DocMetadata newVersion = new DocMetadata();
-            newVersion.setFileName(originalFilename);
-            newVersion.setFilePath(filePath.toString());
-            newVersion.setMd5Hash(md5Hash);
-            newVersion.setStatus(DocMetadataService.STATUS_PUBLISHING);
-            newVersion.setIsCurrent(false);
-            newVersion.setFileSize(file.getSize());
-            docMetadataService.save(newVersion);
-
-            logger.info("创建新版本记录: id={}, file={}", newVersion.getId(), originalFilename);
-
-            // 异步处理向量化
-            Long versionId = newVersion.getId();
-            vectorExecutor.execute(() -> {
-                try {
-                    vectorIndexService.indexSingleFileWithVersion(filePath.toString(), versionId);
-                } catch (Exception e) {
-                    logger.error("异步向量化失败: file={}, versionId={}, error={}",
-                        originalFilename, versionId, e.getMessage(), e);
-                    // 失败时标记版本为 deprecated
-                    newVersion.setStatus(DocMetadataService.STATUS_DEPRECATED);
-                    docMetadataService.updateById(newVersion);
-                }
-            });
-
-            // 立即返回响应
-            return ResponseEntity.ok(createResponse(
-                "文件已接收，正在后台处理向量化",
-                originalFilename, filePath, file.getSize()));
 
         } catch (IOException e) {
             logger.error("文件上传失败: {}", e.getMessage(), e);
@@ -136,9 +93,52 @@ public class FileUploadController {
             errorResponse.setCode(500);
             errorResponse.setMessage("文件上传失败: " + e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
-        } finally {
-            lock.unlock();
         }
+
+        // 3. 检查数据库是否已存在相同内容的版本（防止唯一索引冲突）
+        DocMetadata existing = docMetadataService.getByFileNameAndMd5(originalFilename, md5Hash);
+        if (existing != null) {
+            logger.info("文件内容已存在: fileName={}, md5={}", originalFilename, md5Hash);
+            // 删除刚上传的冗余文件
+            try {
+                Files.deleteIfExists(filePath);
+                logger.info("已删除冗余文件: {}", filePath);
+            } catch (IOException ex) {
+                logger.warn("删除冗余文件失败: {}", filePath, ex);
+            }
+            return ResponseEntity.ok(createResponse("文件内容未变化，跳过处理", originalFilename, Path.of(filePath.toString()), file.getSize()));
+        }
+
+        // 4. 创建版本记录（status=publishing, is_current=false）
+        DocMetadata newVersion = new DocMetadata();
+        newVersion.setFileName(originalFilename);
+        newVersion.setFilePath(filePath.toString());
+        newVersion.setMd5Hash(md5Hash);
+        newVersion.setStatus(DocMetadataService.STATUS_PUBLISHING);
+        newVersion.setIsCurrent(false);
+        newVersion.setFileSize(file.getSize());
+        docMetadataService.save(newVersion);
+
+        logger.info("创建新版本记录: id={}, file={}", newVersion.getId(), originalFilename);
+
+        // 5. 异步处理向量化（向量化阶段会做内容重复检查和加锁）
+        Long versionId = newVersion.getId();
+        vectorExecutor.execute(() -> {
+            try {
+                vectorIndexService.indexSingleFileWithVersion(filePath.toString(), versionId);
+            } catch (Exception ex) {
+                logger.error("异步向量化失败: file={}, versionId={}, error={}",
+                    originalFilename, versionId, ex.getMessage(), ex);
+                // 失败时标记版本为 deprecated
+                newVersion.setStatus(DocMetadataService.STATUS_DEPRECATED);
+                docMetadataService.updateById(newVersion);
+            }
+        });
+
+        // 6. 立即返回响应
+        return ResponseEntity.ok(createResponse(
+            "文件已接收，正在后台处理向量化",
+            originalFilename, filePath, file.getSize()));
     }
 
     /**

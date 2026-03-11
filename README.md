@@ -17,7 +17,7 @@
 - ✅ **RAG 问答**: 向量检索 + Rerank 重排 + 多轮对话 + 流式输出 ⭐ UPDATED
 - ✅ **AIOps 运维**: 智能诊断 + 多 Agent 协作 + 自动报告
 - ✅ **工具集成**: 文档检索、告警查询、日志分析、时间工具
-- ✅ **会话持久化**: Redis + MySQL 混合存储，异步写入，高并发优化
+- ✅ **会话持久化**: Redis + MySQL 混合存储，异步写入，定时重试同步 ⭐ UPDATED
 - ✅ **语义压缩**: 智能对话摘要，自动压缩长对话历史，节省 Token
 - ✅ **线程池优化**: 专用线程池配置，支持监控告警，高流量可靠性保障
 - ✅ **版本控制**: 文档上传支持版本管理，非阻塞更新
@@ -415,6 +415,70 @@ curl http://localhost:9900/milvus/health
 
 ## 📈 更新日志
 
+### v1.6.0 (2026-03-11)
+
+**新增功能：**
+- ✨ **Redis 到 MySQL 定时同步**: 异步写入失败时记录 sessionId，定时任务重试同步，防止数据丢失
+
+**技术优化：**
+- 🔧 新增 `sync:failed_sessions` Redis 集合：记录写入失败的 session
+- 🔧 新增定时任务 `syncRedisToMySQL()`：每5分钟扫描失败列表重试
+- 🔧 新增分布式锁：防止多实例同时执行同步任务
+- 🔧 修复事务自调用问题：抽取 `MessagePersistService`，避免 Spring 代理失效
+
+**新增文件：**
+- `MessagePersistService.java`：独立事务的消息持久化服务
+
+**同步流程：**
+```
+异步写入失败 → 记录 sessionId 到 Redis 集合
+                      ↓
+           定时任务每5分钟扫描
+                      ↓
+           对比 Redis/MySQL 消息数量
+                      ↓
+           同步缺失消息 → 成功后移除记录
+```
+
+---
+
+### 文件上传版本控制改造 (2026-03-11)
+
+**问题场景：**
+- 不同文件名 + 不同内容 → 直接上传
+- 同文件名 + 不同内容 → 增量更新 + 版本软切换
+- 同文件名 + 相同内容 → 跳过，节省空间
+- 多用户同时上传同文件 → 分布式锁，不冲突
+
+**技术优化：**
+- 🔧 简化 FileUploadController：移除上传阶段 MD5 锁
+- 🔧 改造 FileUpdateLockManager：锁 key 从 MD5 改为文件名
+- 🔧 改造 VectorIndexService：加入内容检查和文件名锁
+- 🔧 新增内容去重：检查 `filename + md5 + is_current=true` 跳过重复向量化
+- 🔧 软切换版本：原子操作，旧版本 is_current=false，新版本 is_current=true
+
+**新增文件：**
+- `MessagePersistService.java`：独立事务的消息持久化服务
+
+**上传流程：**
+```
+用户上传 → 校验格式 → 保存磁盘 → 计算MD5
+                    ↓
+         检查 filename+md5 是否已存在
+                    ↓ 是 → 跳过处理
+                    ↓ 否 ↓
+              创建版本记录(status=publishing)
+                        ↓
+              异步 VectorIndexService
+                        ↓
+              检查 filename+md5+is_current
+                        ↓ 是 → 跳过，标记deprecated
+                        ↓ 否 ↓
+                  获取文件名锁 → 向量化 → 软切换版本
+```
+
+---
+
 ### v1.5.0 (2026-03-05)
 
 **新增功能：**
@@ -570,7 +634,7 @@ conversation:
 ### v1.0.0
 - 初始版本发布
 
-**版本**: v1.4.0
+**版本**: v1.6.0
 **作者**: 1karu32s
 **原作者**: chief
 **许可证**: MIT

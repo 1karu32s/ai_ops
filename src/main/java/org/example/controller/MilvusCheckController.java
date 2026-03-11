@@ -28,12 +28,12 @@ public class MilvusCheckController {
     @GetMapping("/health")
     public ResponseEntity<Map<String, Object>> simpleHealth() {
         Map<String, Object> result = new HashMap<>();
-        
+
         try {
             R<ShowCollectionsResponse> response = milvusClient.showCollections(
                 ShowCollectionsParam.newBuilder().build()
             );
-            
+
             if (response.getStatus() == 0) {
                 result.put("message", "ok");
                 result.put("collections", response.getData().getCollectionNamesList());

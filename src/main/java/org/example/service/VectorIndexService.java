@@ -12,6 +12,7 @@ import lombok.Setter;
 import org.example.constant.MilvusConstants;
 import org.example.dto.DocumentChunk;
 import org.example.entity.DocMetadata;
+import org.example.util.FileUpdateLockManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -46,6 +47,9 @@ public class VectorIndexService {
 
     @Autowired
     private DocMetadataService docMetadataService;
+
+    @Autowired
+    private FileUpdateLockManager fileLockManager;
 
     @Value("${file.upload.path}")
     private String uploadPath;
@@ -174,6 +178,7 @@ public class VectorIndexService {
 
     /**
      * 索引单个文件（带版本控制，支持非阻塞更新）
+     * 包含内容重复检查和文件名锁
      *
      * @param filePath 文件路径
      * @param versionId 版本 ID
@@ -187,53 +192,83 @@ public class VectorIndexService {
             throw new IllegalArgumentException("文件不存在: " + filePath);
         }
 
+        String fileName = path.getFileName().toString();
         logger.info("开始索引文件: {}, versionId={}", path, versionId);
 
-        // 1. 读取文件内容
-        String content = Files.readString(path);
-        logger.info("读取文件: {}, 内容长度: {} 字符", path, content.length());
+        // 1. 获取版本记录，检查 MD5
+        DocMetadata version = docMetadataService.getById(versionId);
+        if (version == null) {
+            throw new IllegalArgumentException("版本记录不存在: " + versionId);
+        }
+        String md5Hash = version.getMd5Hash();
 
-        // 2. 文档分片
-        List<DocumentChunk> chunks = chunkService.chunkDocument(content, path.toString());
-        logger.info("文档分片完成: {} -> {} 个分片", filePath, chunks.size());
-
-        // 3. 为每个分片生成向量并插入 Milvus
-        for (int i = 0; i < chunks.size(); i++) {
-            DocumentChunk chunk = chunks.get(i);
-
-            try {
-                // 生成向量
-                List<Float> vector = embeddingService.generateEmbedding(chunk.getContent());
-
-                // 构建元数据（包含 versionId）
-                Map<String, Object> metadata = buildMetadataWithVersion(path.toString(), chunk, chunks.size(), versionId);
-
-                // 插入到 Milvus
-                insertToMilvus(chunk.getContent(), vector, metadata, chunk.getChunkIndex());
-
-                logger.info("✓ 分片 {}/{} 索引成功", i + 1, chunks.size());
-
-            } catch (Exception e) {
-                logger.error("✗ 分片 {}/{} 索引失败", i + 1, chunks.size(), e);
-                throw new RuntimeException("分片索引失败: " + e.getMessage(), e);
-            }
+        // 2. 检查是否已有相同内容的活跃版本（同文件名 + 同MD5 + is_current=true）
+        DocMetadata existingActiveVersion = docMetadataService.getByFileNameAndMd5(fileName, md5Hash);
+        if (existingActiveVersion != null && existingActiveVersion.getIsCurrent()) {
+            logger.info("文件内容未变化，跳过向量化: fileName={}, md5={}", fileName, md5Hash);
+            // 更新版本状态为 deprecated
+            version.setStatus(DocMetadataService.STATUS_DEPRECATED);
+            docMetadataService.updateById(version);
+            // 删除磁盘上的冗余文件
+            Files.deleteIfExists(path);
+            logger.info("已删除冗余文件: {}", path);
+            return;
         }
 
-        // 4. 所有分片完成后，更新 chunk_count 并切换版本状态
-        String fileName = path.getFileName().toString();
+        // 3. 获取文件名锁（确保同名文件串行处理）
+        boolean lockAcquired = fileLockManager.acquireLock(fileName);
+        if (!lockAcquired) {
+            // 锁获取失败，说明有其他同名文件正在处理
+            logger.info("文件正在被其他节点处理，等待重试: {}", fileName);
+            // 稍后重试，这里不抛异常，让任务自然结束
+            throw new RuntimeException("文件正在被其他节点处理: " + fileName);
+        }
 
-        // 更新版本记录：设置 chunk_count 和状态
-        DocMetadata version = docMetadataService.getById(versionId);
-        if (version != null) {
+        try {
+            // 4. 读取文件内容
+            String content = Files.readString(path);
+            logger.info("读取文件: {}, 内容长度: {} 字符", path, content.length());
+
+            // 5. 文档分片
+            List<DocumentChunk> chunks = chunkService.chunkDocument(content, path.toString());
+            logger.info("文档分片完成: {} -> {} 个分片", filePath, chunks.size());
+
+            // 6. 为每个分片生成向量并插入 Milvus
+            for (int i = 0; i < chunks.size(); i++) {
+                DocumentChunk chunk = chunks.get(i);
+
+                try {
+                    // 生成向量
+                    List<Float> vector = embeddingService.generateEmbedding(chunk.getContent());
+
+                    // 构建元数据（包含 versionId）
+                    Map<String, Object> metadata = buildMetadataWithVersion(path.toString(), chunk, chunks.size(), versionId);
+
+                    // 插入到 Milvus
+                    insertToMilvus(chunk.getContent(), vector, metadata, chunk.getChunkIndex());
+
+                    logger.info("✓ 分片 {}/{} 索引成功", i + 1, chunks.size());
+
+                } catch (Exception e) {
+                    logger.error("✗ 分片 {}/{} 索引失败", i + 1, chunks.size(), e);
+                    throw new RuntimeException("分片索引失败: " + e.getMessage(), e);
+                }
+            }
+
+            // 7. 所有分片完成后，更新 chunk_count 并切换版本状态
             version.setChunkCount(chunks.size());
             docMetadataService.updateById(version);
             logger.info("更新版本记录: versionId={}, chunkCount={}", versionId, chunks.size());
+
+            // 切换到活跃版本
+            switchVersion(fileName, versionId);
+
+            logger.info("文件索引完成: {}, versionId={}, 共 {} 个分片", filePath, versionId, chunks.size());
+
+        } finally {
+            // 8. 释放锁
+            fileLockManager.releaseLock(fileName);
         }
-
-        // 切换到活跃版本
-        switchVersion(fileName, versionId);
-
-        logger.info("文件索引完成: {}, versionId={}, 共 {} 个分片", filePath, versionId, chunks.size());
     }
 
     /**

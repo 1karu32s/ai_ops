@@ -2,34 +2,50 @@ package org.example.util;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 文件更新锁管理器
  * 防止同一文件被并发更新，确保版本控制的原子性
- * 参考 ChatController.SessionInfo 的设计
+ * 使用 Redis 分布式锁，支持集群部署
+ * 锁的 key 基于文件名，确保同名文件的向量化串行执行
  */
 @Component
 public class FileUpdateLockManager {
 
     private static final Logger logger = LoggerFactory.getLogger(FileUpdateLockManager.class);
 
-    // 每个文件名对应一把锁
-    private final Map<String, FileLock> fileLocks = new ConcurrentHashMap<>();
+    private static final String LOCK_PREFIX = "lock:file:";
+
+    @Value("${conversation.summary.lock-timeout-seconds:30}")
+    private int lockTimeoutSeconds;
+
+    private final StringRedisTemplate stringRedisTemplate;
+
+    public FileUpdateLockManager(StringRedisTemplate stringRedisTemplate) {
+        this.stringRedisTemplate = stringRedisTemplate;
+    }
 
     /**
      * 获取文件锁并加锁
+     * 使用文件名作为锁 key，确保同名文件的向量化串行执行
      *
      * @param fileName 文件名
-     * @return FileLock 对象，使用完后需调用 unlock() 释放
+     * @return 是否获取锁成功
      */
-    public FileLock acquireLock(String fileName) {
-        logger.debug("获取文件锁: {}", fileName);
-        return fileLocks.computeIfAbsent(fileName, FileLock::new).lock();
+    public boolean acquireLock(String fileName) {
+        String lockKey = LOCK_PREFIX + fileName;
+
+        logger.debug("获取文件锁: fileName={}, lockKey={}", fileName, lockKey);
+
+        Boolean acquired = stringRedisTemplate.opsForValue()
+                .setIfAbsent(lockKey, "1", lockTimeoutSeconds, TimeUnit.SECONDS);
+
+        return Boolean.TRUE.equals(acquired);
     }
 
     /**
@@ -38,68 +54,10 @@ public class FileUpdateLockManager {
      * @param fileName 文件名
      */
     public void releaseLock(String fileName) {
-        logger.debug("释放文件锁: {}", fileName);
-        FileLock lock = fileLocks.get(fileName);
-        if (lock != null) {
-            lock.unlock();
-        }
+        String lockKey = LOCK_PREFIX + fileName;
+
+        logger.debug("释放文件锁: fileName={}, lockKey={}", fileName, lockKey);
+        stringRedisTemplate.delete(lockKey);
     }
 
-    /**
-     * 清理未使用的锁（可选，定期调用以释放内存）
-     */
-    public void cleanupIdleLocks() {
-        fileLocks.entrySet().removeIf(entry -> {
-            FileLock lock = entry.getValue();
-            if (!lock.isLocked()) {
-                logger.debug("清理空闲锁: {}", entry.getKey());
-                return true;
-            }
-            return false;
-        });
-    }
-
-    /**
-     * 文件锁
-     */
-    public static class FileLock {
-        private final String fileName;
-        private final ReentrantLock lock;
-
-        public FileLock(String fileName) {
-            this.fileName = fileName;
-            this.lock = new ReentrantLock();
-        }
-
-        /**
-         * 加锁
-         *
-         * @return this，支持链式调用
-         */
-        public FileLock lock() {
-            lock.lock();
-            return this;
-        }
-
-        /**
-         * 解锁
-         */
-        public void unlock() {
-            // 只有持有锁的线程才能解锁，避免异常
-            if (lock.isHeldByCurrentThread()) {
-                lock.unlock();
-            }
-        }
-
-        /**
-         * 是否已被加锁
-         */
-        public boolean isLocked() {
-            return lock.isLocked();
-        }
-
-        public String getFileName() {
-            return fileName;
-        }
-    }
 }

@@ -8,11 +8,15 @@ import org.example.mapper.ChatMessageMapper;
 import org.example.mapper.ChatSessionMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executor;
 
@@ -37,8 +41,17 @@ public class ConversationService {
     private ConversationSummaryService conversationSummaryService;
 
     @Autowired
+    private MessagePersistService messagePersistService;
+
+    @Autowired
     @Qualifier("persistExecutor")
     private Executor persistExecutor;
+
+    @Autowired
+    private StringRedisTemplate stringRedisTemplate;
+
+    private static final String SYNC_LOCK_KEY = "sync:redis_to_mysql:lock";
+    private static final long SYNC_LOCK_TIMEOUT = 4 * 60 * 1000; // 4分钟锁超时（任务5分钟执行一次）
 
     /**
      * 获取或创建会话
@@ -332,7 +345,7 @@ public class ConversationService {
 
     /**
      * 带重试机制的持久化
-     * 指数退避重试，最大重试3次
+     * 指数退避重试，最大重试3次，如果仍然失败则记录到待重试列表
      */
     private void persistWithRetry(String sessionId, String userMessage, String aiReply, long startTime) {
         int maxRetries = 3;
@@ -341,7 +354,7 @@ public class ConversationService {
 
         while (retryCount < maxRetries && !success) {
             try {
-                persistMessagePair(sessionId, userMessage, aiReply);
+                messagePersistService.persistMessagePair(sessionId, userMessage, aiReply);
                 success = true;
                 long dbTime = System.currentTimeMillis();
                 log.debug("MySQL 异步写入完成，总耗时: {}ms", dbTime - startTime);
@@ -352,10 +365,10 @@ public class ConversationService {
             } catch (Exception e) {
                 retryCount++;
                 if (retryCount >= maxRetries) {
-                    // 达到最大重试次数
+                    // 达到最大重试次数，记录到待重试列表
                     log.error("异步持久化消息失败，已达最大重试次数({}): sessionId={}, error={}",
                             maxRetries, sessionId, e.getMessage(), e);
-                    // 失败的消息可以记录到本地队列或死信队列，这里暂时只记录日志
+                    recordFailedSession(sessionId);
                     return;
                 }
 
@@ -364,6 +377,7 @@ public class ConversationService {
                 if (!isRetryable) {
                     log.error("异步持久化消息失败，不可重试异常: sessionId={}, error={}",
                             sessionId, e.getMessage(), e);
+                    recordFailedSession(sessionId);
                     return;
                 }
 
@@ -377,9 +391,24 @@ public class ConversationService {
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                     log.error("重试等待被中断: sessionId={}", sessionId);
+                    recordFailedSession(sessionId);
                     return;
                 }
             }
+        }
+    }
+
+    /**
+     * 记录失败的 session 到待重试列表
+     */
+    private void recordFailedSession(String sessionId) {
+        try {
+            String key = "sync:failed_sessions";
+            stringRedisTemplate.opsForSet().add(key, sessionId);
+            stringRedisTemplate.expire(key, Duration.ofHours(24)); // 24小时后过期
+            log.debug("已记录待重试会话: {}", sessionId);
+        } catch (Exception e) {
+            log.error("记录失败会话失败: sessionId={}", sessionId, e);
         }
     }
 
@@ -404,43 +433,6 @@ public class ConversationService {
 
         // 根据异常类型判断
         return e instanceof java.sql.SQLException;
-    }
-
-    /**
-     * 持久化消息对到 MySQL
-     */
-    @Transactional
-    protected void persistMessagePair(String sessionId, String userMessage, String aiReply) {
-        try {
-            // 保存用户消息
-            ChatMessage userMsg = new ChatMessage();
-            userMsg.setSessionId(sessionId);
-            userMsg.setRole("user");
-            userMsg.setContent(userMessage);
-            chatMessageMapper.insert(userMsg);
-
-            // 保存 AI 回复
-            ChatMessage aiMsg = new ChatMessage();
-            aiMsg.setSessionId(sessionId);
-            aiMsg.setRole("assistant");
-            aiMsg.setContent(aiReply);
-            chatMessageMapper.insert(aiMsg);
-
-            // 更新会话消息计数
-            ChatSession session = chatSessionMapper.selectOne(
-                    new LambdaQueryWrapper<ChatSession>()
-                            .eq(ChatSession::getSessionId, sessionId)
-            );
-            if (session != null) {
-                session.setMessageCount(session.getMessageCount() + 1);
-                chatSessionMapper.updateById(session);
-            }
-
-            log.debug("消息对已持久化到 MySQL: sessionId={}", sessionId);
-        } catch (Exception e) {
-            log.error("持久化消息对失败: sessionId={}", sessionId, e);
-            throw e;
-        }
     }
 
     /**
@@ -501,6 +493,126 @@ public class ConversationService {
                     return;
                 }
             }
+        }
+    }
+
+    /**
+     * 定时重试同步失败的会话
+     * 每5分钟执行一次，只重试之前写入失败的 session
+     */
+    @Scheduled(fixedRate = 5 * 60 * 1000) // 5分钟
+    public void syncRedisToMySQL() {
+        // 1. 获取分布式锁，防止多实例同时执行
+        Boolean acquired = stringRedisTemplate.opsForValue()
+                .setIfAbsent(SYNC_LOCK_KEY, "1", Duration.ofMillis(SYNC_LOCK_TIMEOUT));
+
+        if (!Boolean.TRUE.equals(acquired)) {
+            log.debug("上次同步任务仍在执行中，跳过本次执行");
+            return;
+        }
+
+        try {
+            // 2. 获取待重试的 session 列表
+            String failedKey = "sync:failed_sessions";
+            Set<String> failedSessionIds = stringRedisTemplate.opsForSet().members(failedKey);
+
+            if (failedSessionIds == null || failedSessionIds.isEmpty()) {
+                log.info("没有需要重试的会话");
+                return;
+            }
+
+            log.info("发现 {} 个会话需要重试同步", failedSessionIds.size());
+
+            int successCount = 0;
+            int failCount = 0;
+
+            for (String sessionId : failedSessionIds) {
+                try {
+                    // 尝试重新持久化该 session 的最新消息
+                    if (retrySyncSession(sessionId)) {
+                        // 成功后从待重试列表移除
+                        stringRedisTemplate.opsForSet().remove(failedKey, sessionId);
+                        successCount++;
+                    } else {
+                        failCount++;
+                    }
+                } catch (Exception e) {
+                    failCount++;
+                    log.error("重试同步会话失败: sessionId={}", sessionId, e);
+                }
+            }
+
+            log.info("重试同步完成: 成功={}, 仍失败={}", successCount, failCount);
+
+        } catch (Exception e) {
+            log.error("定时同步任务执行失败", e);
+        } finally {
+            // 3. 释放锁
+            stringRedisTemplate.delete(SYNC_LOCK_KEY);
+        }
+    }
+
+    /**
+     * 重试同步单个会话
+     * 获取该 session 在 Redis 中的最新消息，尝试重新持久化
+     * @return true 如果同步成功
+     */
+    private boolean retrySyncSession(String sessionId) {
+        try {
+            // 获取 Redis 中的消息
+            RedisCacheService.SessionMetadata metadata = redisCacheService.getSession(sessionId);
+            if (metadata == null) {
+                // Redis 会话已过期，删除待重试记录
+                log.warn("待重试会话已从 Redis 过期: {}", sessionId);
+                return true;
+            }
+
+            List<RedisCacheService.Message> redisMessages = redisCacheService.getMessages(sessionId, 1000);
+            if (redisMessages.isEmpty()) {
+                return true;
+            }
+
+            // 获取 MySQL 中的消息数量
+            ChatSession dbSession = chatSessionMapper.selectOne(
+                    new LambdaQueryWrapper<ChatSession>()
+                            .eq(ChatSession::getSessionId, sessionId)
+            );
+
+            int mysqlCount = dbSession != null ? dbSession.getMessageCount() : 0;
+            int redisCount = redisMessages.size();
+
+            if (redisCount <= mysqlCount) {
+                // 数据已经同步，删除待重试记录
+                return true;
+            }
+
+            // 同步缺失的消息
+            int synced = 0;
+            for (int i = mysqlCount; i < redisCount; i++) {
+                RedisCacheService.Message msg = redisMessages.get(i);
+                try {
+                    ChatMessage chatMsg = new ChatMessage();
+                    chatMsg.setSessionId(sessionId);
+                    chatMsg.setRole(msg.getRole());
+                    chatMsg.setContent(msg.getContent());
+                    chatMessageMapper.insert(chatMsg);
+                    synced++;
+                } catch (Exception e) {
+                    log.error("重试同步消息失败: sessionId={}, index={}", sessionId, i, e);
+                }
+            }
+
+            if (synced > 0 && dbSession != null) {
+                dbSession.setMessageCount(redisCount);
+                chatSessionMapper.updateById(dbSession);
+            }
+
+            log.info("会话重试同步完成: sessionId={}, 同步消息数={}", sessionId, synced);
+            return synced > 0;
+
+        } catch (Exception e) {
+            log.error("重试同步会话异常: sessionId={}", sessionId, e);
+            return false;
         }
     }
 }
