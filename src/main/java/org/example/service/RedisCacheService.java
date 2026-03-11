@@ -269,8 +269,11 @@ public class RedisCacheService {
      */
     public void updateSessionTitle(String sessionId, String title) {
         String sessionKey = SESSION_KEY_PREFIX + sessionId;
+        long now = System.currentTimeMillis();
         redisTemplate.opsForHash().put(sessionKey, "title", title);
-        redisTemplate.opsForHash().put(sessionKey, "updateTime", String.valueOf(System.currentTimeMillis()));
+        redisTemplate.opsForHash().put(sessionKey, "updateTime", String.valueOf(now));
+        // 同步更新 ZSet 的 score，保证最近会话列表排序正确
+        stringRedisTemplate.opsForZSet().add(RECENT_SESSIONS_KEY, sessionId, now);
     }
 
     // ==================== DTO ====================
