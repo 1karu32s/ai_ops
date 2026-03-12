@@ -42,6 +42,9 @@ public class ChatService {
     private QueryLogsTools queryLogsTools;
 
     @Autowired
+    private RedisCacheService redisCacheService;
+
+    @Autowired
     private ToolCallbackProvider tools;
 
     @Value("${spring.ai.dashscope.api-key}")
@@ -82,23 +85,32 @@ public class ChatService {
     }
 
     /**
-     * 构建系统提示词（包含历史消息）
+     * 构建系统提示词（包含历史消息和摘要）
+     * @param sessionId 会话ID
      * @param history 历史消息列表
      * @return 完整的系统提示词
      */
-    public String buildSystemPrompt(List<Map<String, String>> history) {
+    public String buildSystemPrompt(String sessionId, List<Map<String, String>> history) {
         StringBuilder systemPromptBuilder = new StringBuilder();
-        
+
         // 基础系统提示
         systemPromptBuilder.append("你是一个专业的智能助手，可以获取当前时间、查询天气信息、搜索内部文档知识库，以及查询 Prometheus 告警信息。\n");
         systemPromptBuilder.append("当用户询问时间相关问题时，使用 getCurrentDateTime 工具。\n");
         systemPromptBuilder.append("当用户需要查询公司内部文档、流程、最佳实践或技术指南时，使用 queryInternalDocs 工具。\n");
         systemPromptBuilder.append("当用户需要查询 Prometheus 告警、监控指标或系统告警状态时，使用 queryPrometheusAlerts 工具。\n");
         systemPromptBuilder.append("当用户需要查询腾讯云日志时，请调用腾讯云mcp服务查询,默认查询地域ap-guangzhou,查询时间范围为近一个月。\n\n");
-        
-        // 添加历史消息
+
+        // 添加对话摘要（从Redis缓存获取）
+        String summary = redisCacheService.getSummary(sessionId);
+        if (summary != null) {
+            systemPromptBuilder.append("--- 历史对话摘要 ---\n");
+            systemPromptBuilder.append(summary).append("\n");
+            systemPromptBuilder.append("--- 摘要结束 ---\n\n");
+        }
+
+        // 添加最近对话历史
         if (!history.isEmpty()) {
-            systemPromptBuilder.append("--- 对话历史 ---\n");
+            systemPromptBuilder.append("--- 最近对话 ---\n");
             for (Map<String, String> msg : history) {
                 String role = msg.get("role");
                 String content = msg.get("content");

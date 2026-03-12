@@ -41,6 +41,9 @@ public class ConversationSummaryService {
     @Autowired
     private RedisTemplate<String, Object> redisTemplate;
 
+    @Autowired
+    private RedisCacheService redisCacheService;
+
     @Value("${spring.ai.dashscope.api-key}")
     private String dashScopeApiKey;
 
@@ -140,6 +143,9 @@ public class ConversationSummaryService {
 
             // 6. 标记消息为已压缩
             markAsCompressed(uncompressedMessages);
+
+            // 7. 同步更新 Redis 缓存
+            redisCacheService.saveSummary(sessionId, newSummary);
 
             log.info("会话 {} 压缩完成，压缩消息数: {}, 耗时: {}ms",
                     sessionId, uncompressedMessages.size(), System.currentTimeMillis() - startTime);

@@ -15,10 +15,12 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 对话服务
@@ -53,36 +55,60 @@ public class ConversationService {
     private static final String SYNC_LOCK_KEY = "sync:redis_to_mysql:lock";
     private static final long SYNC_LOCK_TIMEOUT = 4 * 60 * 1000; // 4分钟锁超时（任务5分钟执行一次）
 
+    // 缓存击穿防护锁
+    private static final String CACHE_LOCK_PREFIX = "lock:cache:";
+    private static final int CACHE_LOCK_TIMEOUT = 30; // 30秒锁超时
+
     /**
-     * 获取或创建会话
+     * 获取或创建会话（DCL 防缓存击穿）
      */
     public String getOrCreateSession(String sessionId) {
         if (sessionId == null || sessionId.isEmpty()) {
             sessionId = UUID.randomUUID().toString();
         }
 
-        // 检查 Redis 中是否存在
+        // 1. 先查 Redis
         RedisCacheService.SessionMetadata metadata = redisCacheService.getSession(sessionId);
+        if (metadata != null) {
+            return sessionId;
+        }
 
-        if (metadata == null) {
-            // Redis 未命中，检查 MySQL
-            ChatSession dbSession = chatSessionMapper.selectOne(
-                    new LambdaQueryWrapper<ChatSession>()
-                            .eq(ChatSession::getSessionId, sessionId)
-            );
+        // 2. Redis 未命中，加锁
+        String lockKey = CACHE_LOCK_PREFIX + "session:" + sessionId;
+        boolean locked = tryAcquireLock(lockKey);
 
-            if (dbSession != null) {
-                // 回填 Redis
-                redisCacheService.createSession(sessionId, dbSession.getTitle());
-                log.debug("从 MySQL 回填会话到 Redis: {}", sessionId);
-            } else {
-                // 创建新会话
-                redisCacheService.createSession(sessionId, "新对话");
+        if (locked) {
+            try {
+                // 3. 双重检查
+                metadata = redisCacheService.getSession(sessionId);
+                if (metadata != null) {
+                    return sessionId;
+                }
 
-                // 异步持久化到 MySQL
-                persistSession(sessionId, "新对话");
-                log.debug("创建新会话: {}", sessionId);
+                // 4. 查 MySQL
+                ChatSession dbSession = chatSessionMapper.selectOne(
+                        new LambdaQueryWrapper<ChatSession>()
+                                .eq(ChatSession::getSessionId, sessionId)
+                );
+
+                if (dbSession != null) {
+                    // 回填 Redis
+                    redisCacheService.createSession(sessionId, dbSession.getTitle());
+                    log.debug("从 MySQL 回填会话到 Redis: {}", sessionId);
+                } else {
+                    // 创建新会话
+                    redisCacheService.createSession(sessionId, "新对话");
+                    // 异步持久化到 MySQL
+                    persistSession(sessionId, "新对话");
+                    log.debug("创建新会话: {}", sessionId);
+                }
+            } finally {
+                releaseLock(lockKey);
             }
+        } else {
+            // 5. 未获取到锁，等待后重试
+            waitForCache(sessionId);
+            // 不需要再查，缓存可能在其他请求中已回填
         }
 
         return sessionId;
@@ -113,6 +139,7 @@ public class ConversationService {
 
     /**
      * 如果会话没有标题，则设置为用户消息的前30个字符
+     * 统一逻辑：Redis + 异步写 MySQL
      */
     private void updateSessionTitleIfNeeded(String sessionId, String userMessage) {
         try {
@@ -125,6 +152,8 @@ public class ConversationService {
                     String newTitle = userMessage.length() > 30 ?
                         userMessage.substring(0, 30) + "..." : userMessage;
                     redisCacheService.updateSessionTitle(sessionId, newTitle);
+                    // 异步持久化到 MySQL
+                    persistSessionTitleAsync(sessionId, newTitle);
                     log.debug("更新会话标题: sessionId={}, title={}", sessionId, newTitle);
                 }
             }
@@ -134,7 +163,7 @@ public class ConversationService {
     }
 
     /**
-     * 获取会话消息列表
+     * 获取会话消息列表（DCL 防缓存击穿）
      * Cache-Aside 模式
      */
     public List<RedisCacheService.Message> getMessages(String sessionId, int limit) {
@@ -145,23 +174,49 @@ public class ConversationService {
             return messages;
         }
 
-        // 2. Redis 未命中，查 MySQL
-        List<ChatMessage> dbMessages = chatMessageMapper.selectList(
-                new LambdaQueryWrapper<ChatMessage>()
-                        .eq(ChatMessage::getSessionId, sessionId)
-                        .orderByAsc(ChatMessage::getCreateTime)
-                        .last("LIMIT " + limit)
-        );
+        // 2. Redis 未命中，加锁
+        String lockKey = CACHE_LOCK_PREFIX + "messages:" + sessionId;
+        boolean locked = tryAcquireLock(lockKey);
 
-        if (!dbMessages.isEmpty()) {
-            // 3. 回填 Redis
-            for (ChatMessage msg : dbMessages) {
-                redisCacheService.addMessage(sessionId, msg.getRole(), msg.getContent());
+        List<ChatMessage> dbMessages;
+        if (locked) {
+            try {
+                // 3. 双重检查
+                messages = redisCacheService.getMessages(sessionId, limit);
+                if (!messages.isEmpty()) {
+                    return messages;
+                }
+
+                // 4. 查 MySQL
+                dbMessages = chatMessageMapper.selectList(
+                        new LambdaQueryWrapper<ChatMessage>()
+                                .eq(ChatMessage::getSessionId, sessionId)
+                                .orderByAsc(ChatMessage::getCreateTime)
+                                .last("LIMIT " + limit)
+                );
+
+                if (!dbMessages.isEmpty()) {
+                    // 5. 回填 Redis
+                    for (ChatMessage msg : dbMessages) {
+                        redisCacheService.addMessage(sessionId, msg.getRole(), msg.getContent());
+                    }
+                    log.debug("从 MySQL 回填消息到 Redis: sessionId={}, count={}", sessionId, dbMessages.size());
+                }
+            } finally {
+                releaseLock(lockKey);
             }
-            log.debug("从 MySQL 回填消息到 Redis: sessionId={}, count={}", sessionId, dbMessages.size());
+        } else {
+            // 6. 未获取到锁，等待后重试从 Redis 获取
+            waitForCache(sessionId);
+            messages = redisCacheService.getMessages(sessionId, limit);
+            if (!messages.isEmpty()) {
+                return messages;
+            }
+            // 仍然没有，返回空（避免阻塞）
+            return Collections.emptyList();
         }
 
-        // 4. 转换为 DTO
+        // 7. 转换为 DTO
         return dbMessages.stream().map(msg -> {
             RedisCacheService.Message m = new RedisCacheService.Message();
             m.setRole(msg.getRole());
@@ -172,7 +227,7 @@ public class ConversationService {
     }
 
     /**
-     * 获取会话元数据
+     * 获取会话元数据（DCL 防缓存击穿）
      */
     public RedisCacheService.SessionMetadata getSessionMetadata(String sessionId) {
         // 1. 先查 Redis
@@ -182,21 +237,41 @@ public class ConversationService {
             return metadata;
         }
 
-        // 2. Redis 未命中，查 MySQL
-        ChatSession dbSession = chatSessionMapper.selectOne(
-                new LambdaQueryWrapper<ChatSession>()
-                        .eq(ChatSession::getSessionId, sessionId)
-        );
+        // 2. Redis 未命中，加锁
+        String lockKey = CACHE_LOCK_PREFIX + "session:" + sessionId;
+        boolean locked = tryAcquireLock(lockKey);
 
-        if (dbSession != null) {
-            // 回填 Redis
-            redisCacheService.createSession(sessionId, dbSession.getTitle());
-            metadata = new RedisCacheService.SessionMetadata();
-            metadata.setSessionId(dbSession.getSessionId());
-            metadata.setTitle(dbSession.getTitle());
-            metadata.setMessageCount(dbSession.getMessageCount());
-            metadata.setCreateTime(dbSession.getCreateTime().getTime());
-            metadata.setUpdateTime(dbSession.getUpdateTime().getTime());
+        if (locked) {
+            try {
+                // 3. 双重检查
+                metadata = redisCacheService.getSession(sessionId);
+                if (metadata != null) {
+                    return metadata;
+                }
+
+                // 4. 查 MySQL
+                ChatSession dbSession = chatSessionMapper.selectOne(
+                        new LambdaQueryWrapper<ChatSession>()
+                                .eq(ChatSession::getSessionId, sessionId)
+                );
+
+                if (dbSession != null) {
+                    // 5. 回填 Redis
+                    redisCacheService.createSession(sessionId, dbSession.getTitle());
+                    metadata = new RedisCacheService.SessionMetadata();
+                    metadata.setSessionId(dbSession.getSessionId());
+                    metadata.setTitle(dbSession.getTitle());
+                    metadata.setMessageCount(dbSession.getMessageCount());
+                    metadata.setCreateTime(dbSession.getCreateTime().getTime());
+                    metadata.setUpdateTime(dbSession.getUpdateTime().getTime());
+                }
+            } finally {
+                releaseLock(lockKey);
+            }
+        } else {
+            // 6. 未获取到锁，等待后重试
+            waitForCache(sessionId);
+            metadata = redisCacheService.getSession(sessionId);
         }
 
         return metadata;
@@ -244,34 +319,16 @@ public class ConversationService {
     }
 
     /**
-     * 修改会话标题（同步写穿：先MySQL后Redis）
+     * 修改会话标题
+     * 统一逻辑：Redis + 异步写 MySQL
      */
     public void updateSessionTitle(String sessionId, String newTitle) {
-        // 1. 先更新 MySQL（主数据源）
-        ChatSession session = chatSessionMapper.selectOne(
-                new LambdaQueryWrapper<ChatSession>()
-                        .eq(ChatSession::getSessionId, sessionId)
-        );
-        if (session == null) {
-            throw new RuntimeException("会话不存在: " + sessionId);
-        }
+        // 1. 先更新 Redis（缓存）
+        redisCacheService.updateSessionTitle(sessionId, newTitle);
+        log.debug("Redis会话标题已更新: sessionId={}, newTitle={}", sessionId, newTitle);
 
-        String oldTitle = session.getTitle();
-        session.setTitle(newTitle);
-        chatSessionMapper.updateById(session);
-        log.debug("MySQL会话标题已更新: sessionId={}, oldTitle={}, newTitle={}", sessionId, oldTitle, newTitle);
-
-        // 2. 再更新 Redis（缓存），如果失败则回滚MySQL
-        try {
-            redisCacheService.updateSessionTitle(sessionId, newTitle);
-            log.debug("Redis会话标题已更新: sessionId={}, newTitle={}", sessionId, newTitle);
-        } catch (Exception e) {
-            // 回滚 MySQL
-            session.setTitle(oldTitle);
-            chatSessionMapper.updateById(session);
-            log.error("Redis更新失败，已回滚MySQL: sessionId={}", sessionId, e);
-            throw new RuntimeException("缓存更新失败，已回滚: " + e.getMessage());
-        }
+        // 2. 异步持久化到 MySQL
+        persistSessionTitleAsync(sessionId, newTitle);
     }
 
     /**
@@ -341,6 +398,27 @@ public class ConversationService {
         } catch (Exception e) {
             log.error("持久化会话失败: sessionId={}", sessionId, e);
         }
+    }
+
+    /**
+     * 异步持久化会话标题到 MySQL
+     */
+    private void persistSessionTitleAsync(String sessionId, String title) {
+        persistExecutor.execute(() -> {
+            try {
+                ChatSession session = chatSessionMapper.selectOne(
+                        new LambdaQueryWrapper<ChatSession>()
+                                .eq(ChatSession::getSessionId, sessionId)
+                );
+                if (session != null) {
+                    session.setTitle(title);
+                    chatSessionMapper.updateById(session);
+                    log.debug("会话标题已异步持久化到 MySQL: sessionId={}, title={}", sessionId, title);
+                }
+            } catch (Exception e) {
+                log.error("异步持久化会话标题失败: sessionId={}, title={}", sessionId, title, e);
+            }
+        });
     }
 
     /**
@@ -613,6 +691,46 @@ public class ConversationService {
         } catch (Exception e) {
             log.error("重试同步会话异常: sessionId={}", sessionId, e);
             return false;
+        }
+    }
+
+    // ==================== 缓存击穿防护方法 ====================
+
+    /**
+     * 尝试获取缓存锁（双重检查锁模式）
+     * @param lockKey 锁的 key
+     * @return 是否成功获取锁
+     */
+    private boolean tryAcquireLock(String lockKey) {
+        try {
+            Boolean acquired = stringRedisTemplate.opsForValue()
+                    .setIfAbsent(lockKey, "1", CACHE_LOCK_TIMEOUT, TimeUnit.SECONDS);
+            return Boolean.TRUE.equals(acquired);
+        } catch (Exception e) {
+            log.warn("获取缓存锁失败: {}, 继续执行", lockKey);
+            return true; // 获取锁失败时允许继续执行，避免阻塞
+        }
+    }
+
+    /**
+     * 释放缓存锁
+     */
+    private void releaseLock(String lockKey) {
+        try {
+            stringRedisTemplate.delete(lockKey);
+        } catch (Exception e) {
+            log.warn("释放缓存锁失败: {}", lockKey);
+        }
+    }
+
+    /**
+     * 等待并重试获取缓存（用于未获取到锁时）
+     */
+    private void waitForCache(String sessionId) {
+        try {
+            Thread.sleep(100); // 等待100ms
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 }

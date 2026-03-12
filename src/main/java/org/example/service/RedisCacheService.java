@@ -4,6 +4,9 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
+import org.example.entity.ChatSummary;
+import org.example.mapper.ChatSummaryMapper;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.RedisTemplate;
@@ -15,6 +18,7 @@ import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
 import java.util.*;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -39,7 +43,15 @@ public class RedisCacheService {
     private static final String MESSAGES_KEY_SUFFIX = ":messages";
     private static final String RECENT_SESSIONS_KEY = "sessions:recent";
     private static final String DELETED_SESSIONS_KEY = "sessions:deleted"; // 软删除的会话ID集合
+    private static final String SUMMARY_KEY_PREFIX = "summary:"; // 摘要缓存前缀
+    private static final String SUMMARY_LOCK_PREFIX = "lock:summary:"; // 摘要缓存锁前缀
     private static final long DEFAULT_TTL_SECONDS = 604800; // 7天
+
+    @Autowired
+    private ChatSummaryMapper chatSummaryMapper;
+
+    @Autowired
+    private Executor summaryExecutor; // 用于异步回填摘要
 
     public RedisCacheService(RedisTemplate<String, Object> redisTemplate, StringRedisTemplate stringRedisTemplate, ObjectMapper objectMapper) {
         this.redisTemplate = redisTemplate;
@@ -274,6 +286,92 @@ public class RedisCacheService {
         redisTemplate.opsForHash().put(sessionKey, "updateTime", String.valueOf(now));
         // 同步更新 ZSet 的 score，保证最近会话列表排序正确
         stringRedisTemplate.opsForZSet().add(RECENT_SESSIONS_KEY, sessionId, now);
+    }
+
+    /**
+     * 获取对话摘要（DCL 防缓存击穿 + 异步回填）
+     */
+    public String getSummary(String sessionId) {
+        // 1. 先查 Redis
+        String cached = stringRedisTemplate.opsForValue().get(SUMMARY_KEY_PREFIX + sessionId);
+        if (cached != null) {
+            return cached;
+        }
+
+        // 2. Redis未命中，加锁防止击穿
+        String lockKey = SUMMARY_LOCK_PREFIX + sessionId;
+        try {
+            Boolean locked = stringRedisTemplate.opsForValue()
+                    .setIfAbsent(lockKey, "1", 30, TimeUnit.SECONDS);
+
+            if (Boolean.TRUE.equals(locked)) {
+                try {
+                    // 3. 双重检查
+                    cached = stringRedisTemplate.opsForValue().get(SUMMARY_KEY_PREFIX + sessionId);
+                    if (cached != null) {
+                        return cached;
+                    }
+
+                    // 4. 查 MySQL（同步，因为已经获取锁）
+                    ChatSummary summary = chatSummaryMapper.selectOne(
+                            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ChatSummary>()
+                                    .eq(ChatSummary::getSessionId, sessionId)
+                    );
+
+                    if (summary != null && summary.getContent() != null) {
+                        stringRedisTemplate.opsForValue().set(
+                                SUMMARY_KEY_PREFIX + sessionId,
+                                summary.getContent(),
+                                1, TimeUnit.HOURS
+                        );
+                        return summary.getContent();
+                    }
+                } finally {
+                    stringRedisTemplate.delete(lockKey);
+                }
+            } else {
+                // 5. 未获取到锁，等待后重试
+                Thread.sleep(100);
+                cached = stringRedisTemplate.opsForValue().get(SUMMARY_KEY_PREFIX + sessionId);
+                if (cached != null) {
+                    return cached;
+                }
+            }
+        } catch (Exception e) {
+            log.warn("获取摘要锁失败: {}", sessionId, e);
+        }
+
+        // 6. 如果还是没有，触发异步回填（作为兜底）
+        summaryExecutor.execute(() -> {
+            try {
+                ChatSummary summary = chatSummaryMapper.selectOne(
+                        new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ChatSummary>()
+                                .eq(ChatSummary::getSessionId, sessionId)
+                );
+                if (summary != null && summary.getContent() != null) {
+                    stringRedisTemplate.opsForValue().set(
+                            SUMMARY_KEY_PREFIX + sessionId,
+                            summary.getContent(),
+                            1, TimeUnit.HOURS
+                    );
+                }
+            } catch (Exception e) {
+                log.error("异步回填摘要失败: {}", sessionId, e);
+            }
+        });
+
+        return null;
+    }
+
+    /**
+     * 保存摘要到 Redis（压缩完成后同步写入）
+     */
+    public void saveSummary(String sessionId, String content) {
+        stringRedisTemplate.opsForValue().set(
+                SUMMARY_KEY_PREFIX + sessionId,
+                content,
+                1, TimeUnit.HOURS
+        );
     }
 
     // ==================== DTO ====================

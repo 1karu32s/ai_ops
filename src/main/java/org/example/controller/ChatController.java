@@ -87,8 +87,8 @@ public class ChatController {
 
             logger.info("开始 ReactAgent 对话（支持自动工具调用）");
 
-            // 构建系统提示词（包含历史消息）
-            String systemPrompt = chatService.buildSystemPrompt(history);
+            // 构建系统提示词（包含历史消息和摘要）
+            String systemPrompt = chatService.buildSystemPrompt(sessionId, history);
 
             // 创建 ReactAgent
             ReactAgent agent = chatService.createReactAgent(chatModel, systemPrompt);
@@ -170,8 +170,8 @@ public class ChatController {
 
                 logger.info("开始 ReactAgent 流式对话（支持自动工具调用）");
 
-                // 构建系统提示词（包含历史消息）
-                String systemPrompt = chatService.buildSystemPrompt(history);
+                // 构建系统提示词（包含历史消息和摘要）
+                String systemPrompt = chatService.buildSystemPrompt(sessionId, history);
 
                 // 创建 ReactAgent
                 ReactAgent agent = chatService.createReactAgent(chatModel, systemPrompt);
@@ -215,8 +215,9 @@ public class ChatController {
                                 }
                             }
                         } catch (IOException e) {
-                            logger.error("发送流式消息失败", e);
-                            throw new RuntimeException(e);
+                            // SSE发送失败（客户端断开），不中断stream，让LLM继续生成
+                            // 生成完成后completion callback会保存完整消息到Redis/MySQL
+                            logger.warn("SSE发送失败，客户端已断开，继续等待LLM生成完成: {}", e.getMessage());
                         }
                     },
                     error -> {

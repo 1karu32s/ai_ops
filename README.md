@@ -18,6 +18,7 @@
 - ✅ **AIOps 运维**: 智能诊断 + 多 Agent 协作 + 自动报告
 - ✅ **工具集成**: 文档检索、告警查询、日志分析、时间工具
 - ✅ **会话持久化**: Redis + MySQL 混合存储，异步写入，定时重试同步 ⭐ UPDATED
+- ✅ **SSE 断线保护**: 网络波动不断裂，LLM 继续生成，完整消息落库 ⭐ UPDATED
 - ✅ **语义压缩**: 智能对话摘要，自动压缩长对话历史，节省 Token
 - ✅ **线程池优化**: 专用线程池配置，支持监控告警，高流量可靠性保障
 - ✅ **版本控制**: 文档上传支持版本管理，非阻塞更新
@@ -460,6 +461,25 @@ curl http://localhost:9900/milvus/health
 
 ## 📈 更新日志
 
+### v1.6.1 (2026-03-12)
+
+**问题修复：**
+- 🐛 **SSE 断线消息丢失**: 修复网络波动导致 SSE 断开后，LLM 停止生成、消息不完整的问题
+
+**技术优化：**
+- 🔧 ChatController 流式响应异常处理：catch IOException 不再 throw 异常
+- 🔧 stream.subscribe 继续执行：SSE 断开后 LLM 继续在后台生成完整内容
+- 🔧 completion callback 正常触发：完整消息保存到 Redis + MySQL
+- 🔧 前端降级处理：断线后重试调用非流式 /chat 接口，从 MySQL 获取完整消息
+
+**流程变化：**
+```
+旧流程：SSE断开 → send()失败 → throw RuntimeException → stream中断 → 不保存
+新流程：SSE断开 → send()失败 → catch只记录日志 → stream继续 → completion → 完整保存
+```
+
+---
+
 ### v1.6.0 (2026-03-11)
 
 **新增功能：**
@@ -678,7 +698,7 @@ conversation:
 ### v1.0.0
 - 初始版本发布
 
-**版本**: v1.6.0
+**版本**: v1.6.1
 **作者**: 1karu32s
 **原作者**: chief
 **许可证**: MIT
