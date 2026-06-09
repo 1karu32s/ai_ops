@@ -24,7 +24,7 @@ spring:
   ai:
     dashscope:
       # 🔴 修正点 1：去掉了 ${}，直接填入 Key
-      api-key: sk-d613a96523df4e84b80273d5baa525dc
+      api-key: 
       chat:
         options:
           timeout: 180000  # 超时时间180秒（3分钟）
